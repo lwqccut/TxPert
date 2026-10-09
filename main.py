@@ -4,6 +4,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from time import time
 
@@ -56,16 +57,49 @@ def infer(cfg: DictConfig):
         **cfg.graph,
     )
 
-    trainer = Trainer(
-        accelerator="gpu" if gpu_available else "cpu",
-    )
+    trainer_args = OmegaConf.to_container(cfg.get("trainer", {}), resolve=True)
+    trainer_args.setdefault("accelerator", "gpu" if gpu_available else "cpu")
+    trainer_args.setdefault("devices", 1)
+
+    if cfg.mode == "train":
+        checkpoint_dir = cfg.get("checkpoint_dir", "./outputs/checkpoints")
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename="{epoch:02d}-{train_loss_epoch:.4f}",
+            save_last=True,
+            save_top_k=-1,
+        )
+        trainer_args.setdefault("callbacks", []).append(checkpoint_callback)
+
+    trainer = Trainer(**trainer_args)
+
+    model_args = OmegaConf.to_container(cfg.model, resolve=True)
+
+    if cfg.mode == "train":
+        GSP_model = PertPredictor(
+            input_dim=datamodule.input_dim,
+            output_dim=datamodule.output_dim,
+            model_args=model_args,
+            adata_output_dim=datamodule.adata_output_dim,
+            graph=graph,
+            device=device,
+            lr=cfg.get("lr", 1e-3),
+            min_lr=cfg.get("min_lr", 0.0),
+            lr_scheduler_args=OmegaConf.to_container(
+                cfg.get("lr_scheduler", {}), resolve=True
+            ),
+            weight_decay=cfg.get("weight_decay", 0.0),
+            match_cntr_for_eval=cfg.get("match_cntr_for_eval", True),
+        )
+        trainer.fit(GSP_model, datamodule=datamodule)
+        return
 
     if cfg.mode == "baseline":
         datamodule.setup("fit")
         GSP_model = PertPredictor(
             input_dim=datamodule.input_dim,
             output_dim=datamodule.output_dim,
-            model_args=OmegaConf.to_container(cfg.model, resolve=True),
+            model_args=model_args,
             adata_output_dim=datamodule.adata_output_dim,
             device=device,
             match_cntr_for_eval=cfg.get("match_cntr_for_eval", True),
@@ -82,7 +116,7 @@ def infer(cfg: DictConfig):
             num_perts=len(datamodule.pert2id),
             graph=graph,
             pert_names=list(datamodule.pert2id.keys()),
-            model_args=OmegaConf.to_container(cfg.model, resolve=True),
+            model_args=model_args,
             device=device,
         ).to(device)
         # Testing
@@ -97,7 +131,7 @@ def infer(cfg: DictConfig):
             num_perts=len(datamodule.pert2id),
             graph=graph,
             pert_names=list(datamodule.pert2id.keys()),
-            model_args=OmegaConf.to_container(cfg.model, resolve=True),
+            model_args=model_args,
             device=device,
         ).to(device)
         datamodule.setup("test")

@@ -138,6 +138,11 @@ class PertPredictor(LightningModule):
             target=batch.x[:, : self.adata_output_dim],
         )
 
+        # Keep a stable scalar for Lightning's progress bar and checkpoint
+        # callbacks.  The model-specific loss terms are still logged by
+        # ``self.loss`` above.
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+
         return loss
 
     def sample_inference(self, cntr, pert_idxs, p_emb, cell_types):

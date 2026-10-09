@@ -61,3 +61,16 @@ match_cntr_for_eval: true
 mode: inference
 checkpoint_name: K562_unseen_pert_gat.ckpt
 save_dir: ./cache/predictions/K562_unseen_pert_gat
+
+# Training is available with: python main.py --config-name=config-gat mode=train
+trainer:
+  max_epochs: 20
+  log_every_n_steps: 10
+  default_root_dir: ./outputs
+
+checkpoint_dir: ./outputs/checkpoints
+lr: 0.001
+min_lr: 0.0
+weight_decay: 0.0
+lr_scheduler:
+  type: null

@@ -211,7 +211,11 @@ class PertDataModule(L.LightningDataModule):
         Split the data into control and treatment datasets.
         """
 
-        if self.mode == "baseline":
+        # Training and baseline evaluation both need controls from the
+        # training/validation cell types.  The original condition only
+        # initialized these datasets for ``baseline``, which made the
+        # Lightning fit path fail before its first batch.
+        if self.mode in ("baseline", "train"):
             train_control_mask = (self.adata.obs[cs.CONTROL] == 1) & (
                 self.adata.obs[cs.CELL_TYPE].isin(
                     self.train_cell_types + [self.test_cell_type] + [self.val_cell_type]
@@ -712,7 +716,10 @@ class XcelltypePerturbDataset(Dataset):
         self.pert_conditions = pd.concat(
             [
                 self.pert_conditions,
-                pd.Series([["ctrl"]] * self.control_data_raw_X.shape[0]),
+                # Perturbation conditions are numeric graph indices.  Using
+                # the string label here reaches TxPert.forward and attempts
+                # to index a tensor with ``"ctrl"`` during training.
+                pd.Series([[-1]] * self.control_data_raw_X.shape[0]),
             ]
         )
         self.condition_names = pd.concat([self.condition_names, train_cond_names])
