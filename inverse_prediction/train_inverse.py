@@ -97,18 +97,25 @@ def main():
     xtr, ytr = collect(dm, 'train'); xva, yva = collect(dm, 'val')
     n_genes = xtr.shape[1]; n_candidates = len(dm.pert2id) - 1
     # p indices are dataset ids; remap sparse ids to [0, n_candidates).
-    remap = {v: i for i, v in enumerate(sorted(v for v in dm.id2pert if v >= 0))}
-    ytr = torch.tensor([remap[int(v)] for v in ytr]); yva = torch.tensor([remap[int(v)] for v in yva])
+    expression_lookup = {str(name): i for i, name in enumerate(dm.adata.var_names)}
+    # Direct Top-5 mode: retain only genes with an expression feature. Genes
+    # absent from the measured feature space cannot be identified from this input.
+    candidate_orig = sorted(v for v in dm.id2pert if v >= 0 and dm.id2pert[v] in expression_lookup)
+    remap = {v: i for i, v in enumerate(candidate_orig)}
     graph = GSPGraph(dm.pert2id, dm.gene2id, {'string': {'graph_type': 'string', 'reduce2perts': True, 'mode': 'top_20'}})
     raw_edges = graph.graph_dict['string'][0].long()
     id_to_class = {v: k for k, v in remap.items()}
     edges = torch.tensor([[remap[int(a)], remap[int(b)]] for a, b in raw_edges.T.tolist()
                           if int(a) in remap and int(b) in remap], dtype=torch.long).T if raw_edges.numel() else torch.empty((2, 0), dtype=torch.long)
-    expression_lookup = {str(name): i for i, name in enumerate(dm.adata.var_names)}
     candidate_indices = torch.tensor([expression_lookup.get(dm.id2pert[v], n_genes) for v in remap])
     model = MultiViewInverseModel(n_genes, len(remap), edge_index=edges, candidate_indices=candidate_indices)
-    print(json.dumps({'candidates': len(remap), 'expression_gene_coverage': int((candidate_indices < n_genes).sum()), 'train_conditions': len(ytr), 'unseen_val_conditions': len(yva)}), flush=True)
+    print(json.dumps({'candidate_mode': 'expression_covered_direct_top5', 'candidates': len(remap), 'train_conditions': len(ytr), 'unseen_val_conditions': len(yva)}), flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    # Drop labels outside the measurable candidate space.
+    valid_train = torch.tensor([int(v) in remap for v in ytr])
+    valid_val = torch.tensor([int(v) in remap for v in yva])
+    xtr, ytr = xtr[valid_train], torch.tensor([remap[int(v)] for v in ytr[valid_train]])
+    xva, yva = xva[valid_val], torch.tensor([remap[int(v)] for v in yva[valid_val]])
     loader = DataLoader(TensorDataset(xtr, ytr), batch_size=args.batch_size, shuffle=True)
     salient_k = min(128, n_genes)
     for epoch in range(args.epochs):
