@@ -11,6 +11,7 @@ from time import time
 from loguru import logger
 
 import traceback
+import os
 from lightning import Trainer
 
 from gspp.predictor import PertPredictor
@@ -26,9 +27,8 @@ from gspp.utils import download_files_from_zenodo
 @hydra.main(config_name="config-gat", config_path="configs", version_base="1.3")
 def main(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
-    download_files_from_zenodo(
-        "15420279"
-    )
+    if os.environ.get("TXPERT_SKIP_DOWNLOAD", "0") != "1":
+        download_files_from_zenodo("15420279")
     try:
         t0 = time()
         infer(cfg)
@@ -85,8 +85,10 @@ def infer(cfg: DictConfig):
             device=device,
             lr=cfg.get("lr", 1e-3),
             min_lr=cfg.get("min_lr", 0.0),
-            lr_scheduler_args=OmegaConf.to_container(
-                cfg.get("lr_scheduler", {}), resolve=True
+            lr_scheduler_args=(
+                OmegaConf.to_container(cfg.get("lr_scheduler"), resolve=True)
+                if isinstance(cfg.get("lr_scheduler"), DictConfig)
+                else (cfg.get("lr_scheduler") or {})
             ),
             weight_decay=cfg.get("weight_decay", 0.0),
             match_cntr_for_eval=cfg.get("match_cntr_for_eval", True),
