@@ -1,7 +1,8 @@
 """End-to-end gene perturbation workflow."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+from pathlib import Path
 
 from .forward import build_forward_model
 from .gene_processor import GeneProcessor
@@ -15,9 +16,13 @@ class ResearchAgent:
     def __init__(self, config: Mapping[str, Any], *, processor: GeneProcessor | None = None):
         model_cfg = config.get("model", {})
         retrieval_cfg = config.get("retrieval", {})
+        project_root = Path(__file__).resolve().parents[1]
+        resolve = lambda values: [str((project_root / value).resolve()) if not Path(value).is_absolute() else str(value) for value in values]
         self.processor = processor or GeneProcessor()
-        self.kg = KnowledgeGraph(retrieval_cfg.get("kg_paths", []))
-        self.rag = RAGIndex(retrieval_cfg.get("rag_paths", []), retrieval_cfg.get("embedding_model", "BAAI/bge-m3"), model_cfg.get("cache_dir"))
+        self.kg = KnowledgeGraph(resolve(retrieval_cfg.get("kg_paths", [])))
+        rag_paths = resolve(retrieval_cfg.get("rag_paths", []))
+        self.rag = RAGIndex(rag_paths, retrieval_cfg.get("embedding_model", "BAAI/bge-m3"), model_cfg.get("cache_dir"))
+        self.agent_cfg = config.get("agent", {})
         self.forward = build_forward_model(config.get("forward", {}))
         if model_cfg.get("enabled", False):
             self.llm = QwenLocalClient(
@@ -51,10 +56,16 @@ class ResearchAgent:
         evidence_payload = [{"id": f"E{index}", "kind": item.kind, "source": item.source,
                              "text": item.text, "score": item.score}
                             for index, item in enumerate(evidence)]
+        mechanism_instruction = (
+            "Do not explain mechanisms; return evidence-backed knowledge analysis only."
+            if not self.agent_cfg.get("explain_mechanism", False)
+            else "You may provide a clearly labelled mechanism hypothesis."
+        )
         raw_plan = self.llm.complete(
-            "You are a cautious genomics research agent. Return JSON only with keys: "
+            "You are a cautious genomics knowledge analyst. Return JSON only with keys: "
             "genes (a subset of the resolved genes), perturbation_type, selected_evidence "
-            "(IDs only), confidence (0 to 1), rationale. Never invent genes, IDs, or evidence.",
+            "(IDs only), confidence (0 to 1), rationale. Never invent genes, IDs, or evidence. "
+            + mechanism_instruction,
             f"Task: {task.prompt}\nResolved genes: {task.genes}\n"
             f"Expression profile (selected genes and summary only): {expression_profile}\n"
             f"Evidence: {evidence_payload}",

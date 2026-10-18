@@ -21,7 +21,8 @@ class RAGIndex:
             if not path.exists():
                 raise FileNotFoundError(f"RAG corpus file not found: {path}")
             self._load(path)
-        self._load_encoder(embedding_model, cache_dir)
+        if self.documents:
+            self._load_encoder(embedding_model, cache_dir)
 
     def _load(self, path: Path) -> None:
         if path.suffix.lower() == ".jsonl":

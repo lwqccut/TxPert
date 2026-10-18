@@ -7,14 +7,16 @@ model:
   max_new_tokens: 768
   temperature: 0.0
   auto_install: true
+agent:
+  role: knowledge_analysis
+  explain_mechanism: false
 retrieval:
   # Existing TxPert resources only; no generated/example corpus is used.
   kg_paths:
     - data/graphs/string/v11.5.parquet
     - data/graphs/go/go_top_50.csv
   rag_paths:
-    - README.md
-    - cache/Readme.md
+    []
   embedding_model: BAAI/bge-m3
   top_k: 8
 forward:
