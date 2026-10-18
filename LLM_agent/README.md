@@ -13,11 +13,7 @@
 bash LLM_agent/run.sh
 ```
 
-服务器没有 GPU 或暂时不想下载权重时，可以先用离线冒烟模式验证流程：
-
-```bash
-python -m LLM_agent.run --offline
-```
+真实运行会加载原 TxPert 预处理后的 `cache/K562_single_cell_line` 数据和 checkpoint；Qwen 只接收当前扰动基因的结构化摘要、KG 邻居和 RAG 证据，完整表达向量始终由 TxPert forward model 处理。
 
 也可以传入请求和证据文件：
 
@@ -25,7 +21,7 @@ python -m LLM_agent.run --offline
 python -m LLM_agent.cli --input request.json --kg kg.jsonl --rag docs.jsonl --output result.json
 ```
 
-`DemoForwardModel` 只是运行示例。接入真实 TxPert 时，将它替换为调用 checkpoint 的函数即可；原有训练代码不会被修改。
+默认使用 `K562_unseen_pert_gat.ckpt`。如果要使用自己在 `forward_model/` 训练的模型，将 `forward.backend` 改为 `custom_forward`，并使用更新后的训练脚本生成带有 `model_spec.edge_indices` 的 checkpoint；两种 checkpoint 不能混用。
 
 如果已经在 Python 中加载了 `ConditionedMultiViewPerturbationModel`，可以使用
 `TxPertForwardAdapter(model)` 将它接到 `LLMAgent`，适配器会负责 tensor 转换和推理模式切换。

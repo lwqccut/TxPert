@@ -34,15 +34,25 @@ class ResearchAgent:
         if not task.genes and task.prompt:
             parsed = self.processor.extract(task.prompt, cell_type=task.cell_type)
             task.genes, task.perturbation_ids = parsed.genes, parsed.perturbation_ids
+        if not task.perturbation_ids and hasattr(self.forward, "resolve_perturbations"):
+            task.perturbation_ids = self.forward.resolve_perturbations(task.genes)
+        if not task.control_expression and hasattr(self.forward, "default_control"):
+            task.control_expression = self.forward.default_control()
         if not task.control_expression:
             raise ValueError("control_expression is required for numerical prediction")
         kg = self.kg.query(task.genes, self.top_k)
         query = " ".join([task.prompt, task.cell_type, *task.genes])
         rag = self.rag.search(query, self.top_k)
         evidence = kg + rag
+        expression_profile = (
+            self.forward.analysis_context(task.genes)
+            if hasattr(self.forward, "analysis_context") else {}
+        )
         rationale = self.llm.complete(
             "You are a cautious genomics research agent. Explain evidence and route the numerical prediction.",
-            f"Task: {task.prompt}\nGenes: {task.genes}\nEvidence: {[item.text for item in evidence]}",
+            f"Task: {task.prompt}\nGenes: {task.genes}\n"
+            f"Expression profile (selected genes and summary only): {expression_profile}\n"
+            f"Evidence: {[item.text for item in evidence]}",
         )
         prediction = self.forward(task.control_expression, task.perturbation_ids, {"evidence": evidence, "rationale": rationale})
-        return AgentResult(task, prediction, "txpert-forward", rationale, evidence)
+        return AgentResult(task, prediction, "txpert-checkpoint", rationale, evidence)

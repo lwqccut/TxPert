@@ -23,12 +23,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("LLM_agent/config.yaml"))
     parser.add_argument("--input", type=Path, default=Path("LLM_agent/example_request.json"))
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--offline", action="store_true", help="skip Qwen/BGE downloads and use deterministic fallbacks")
     args = parser.parse_args()
     config = load_yaml(args.config)
-    if args.offline:
-        config.setdefault("model", {})["enabled"] = False
-        config.setdefault("retrieval", {})["embedding_model"] = "__offline__"
     task = parse_task(json.loads(args.input.read_text(encoding="utf-8")))
     result = ResearchAgent(config).run(task)
     output = result.to_json()
