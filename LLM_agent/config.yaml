@@ -69,3 +69,7 @@ forward:
       use_struc_feat: false
 output:
   dir: ./LLM_agent/runs
+knowledge_training:
+  feature_path: ./LLM_agent/runs/knowledge_features.pt
+  model_path: ./LLM_agent/runs/knowledge_forward.pt
+  freeze_base: false

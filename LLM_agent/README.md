@@ -43,6 +43,24 @@ bash LLM_agent/run.sh
 
 `agent.explain_mechanism` 默认是 `false`。此模式下 Qwen 只做知识检索后的证据归纳、相关性判断和置信度评估；机制解释由研究者完成，Forward Model 仍只负责数值预测。
 
+要让知识真正影响训练，先预计算每个扰动基因的 Qwen+BGE 知识向量：
+
+```bash
+python -m LLM_agent.precompute_knowledge \
+  --config LLM_agent/config.yaml \
+  --output LLM_agent/runs/knowledge_features.pt
+```
+
+然后用原 TxPert 预处理数据训练知识增强 Forward Model：
+
+```bash
+python -m LLM_agent.train_knowledge_model \
+  --features LLM_agent/runs/knowledge_features.pt \
+  --out LLM_agent/runs/knowledge_forward.pt
+```
+
+训练损失同时更新原图扰动表示和知识投影/门控层，知识向量会直接影响预测表达，不是训练后的解释文本。
+
 准备一个任务文件（例如 `task.json`，由你自己的任务提供，不由项目生成示例数据）：
 
 ```bash
