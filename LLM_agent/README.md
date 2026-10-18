@@ -61,6 +61,14 @@ python -m LLM_agent.train_knowledge_model \
 
 训练损失同时更新原图扰动表示和知识投影/门控层，知识向量会直接影响预测表达，不是训练后的解释文本。
 
+训练完成后，如需让 Agent 使用知识增强 checkpoint，将配置改为：
+
+```yaml
+forward:
+  backend: knowledge_forward
+  checkpoint: LLM_agent/runs/knowledge_forward.pt
+```
+
 准备一个任务文件（例如 `task.json`，由你自己的任务提供，不由项目生成示例数据）：
 
 ```bash

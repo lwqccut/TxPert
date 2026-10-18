@@ -245,6 +245,44 @@ class CustomForwardCheckpointModel:
             return self.model(x, [list(map(int, perturbation_ids))])[0].cpu()
 
 
+class KnowledgeForwardCheckpointModel(CustomForwardCheckpointModel):
+    """Inference adapter for ``train_knowledge_model.py`` artifacts."""
+    def __init__(self, config: Mapping[str, Any]):
+        import torch
+        from gspp.data.datamodule import PertDataModule
+        from gspp.data.graphmodule import GSPGraph
+        from .knowledge_model import KnowledgeAugmentedPerturbationModel
+
+        checkpoint = Path(str(config["checkpoint"]))
+        if not checkpoint.is_absolute():
+            checkpoint = Path(__file__).resolve().parents[1] / checkpoint
+        artifact = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        spec = artifact["model_spec"]
+        features = torch.load(Path(str(artifact["features"])), map_location="cpu", weights_only=False)
+        dm_cfg = copy.deepcopy(dict(config.get("datamodule", {})))
+        dm_cfg.setdefault("mode", "inference"); dm_cfg.setdefault("task_type", "K562_single_cell_line")
+        dm_cfg.setdefault("match_cntr", True); dm_cfg.setdefault("avg_cntr", True)
+        dm_cfg.setdefault("embed_cntr", True); dm_cfg.setdefault("obsm_key", "raw")
+        dm = PertDataModule(**dm_cfg); dm.prepare_data()
+        graph = GSPGraph(dm.pert2id, dm.gene2id, {
+            name: {"graph_type": name, "reduce2perts": True, "mode": "top_20"}
+            for name in spec["views"]
+        })
+        edges = [torch.as_tensor(graph.graph_dict[name][0], dtype=torch.long) for name in spec["views"]]
+        self.device = str(config.get("device", "auto"))
+        if self.device == "auto": self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = KnowledgeAugmentedPerturbationModel(
+            knowledge_embeddings=features["embeddings"], input_dim=int(spec["input_dim"]),
+            output_dim=int(spec["output_dim"]), num_nodes=int(spec["num_nodes"]), edge_indices=edges,
+        )
+        self.model.load_state_dict(artifact["model"], strict=True)
+        self.model.to(self.device).eval()
+        self.input_dim = int(spec["input_dim"]); self.num_nodes = int(spec["num_nodes"])
+        self._gene_map = {str(k).upper(): int(v) for k, v in dm.pert2id.items()}
+        import numpy as np
+        self.control = np.asarray(dm.control_data_test.X.mean(axis=0)).reshape(-1).tolist()
+
+
 def build_forward_model(config: Mapping[str, Any], *, input_dim: int | None = None,
                         output_dim: int | None = None, num_nodes: int | None = None):
     backend = str(config.get("backend", "txpert"))
@@ -255,6 +293,8 @@ def build_forward_model(config: Mapping[str, Any], *, input_dim: int | None = No
     if backend == "custom_forward":
         model = CustomForwardCheckpointModel(config)
         return model
+    if backend == "knowledge_forward":
+        return KnowledgeForwardCheckpointModel(config)
     if backend != "checkpoint":
         raise ValueError(f"Unsupported forward backend: {backend}")
     if not all(value is not None for value in (input_dim, output_dim, num_nodes)):
