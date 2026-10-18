@@ -44,6 +44,38 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Cannot serialize {type(value).__name__}")
 
 
+@dataclass(frozen=True)
+class AgentPlan:
+    genes: list[str]
+    perturbation_type: str
+    selected_evidence: list[str]
+    confidence: float
+    rationale: str
+
+
+def parse_agent_plan(raw: str, valid_genes: Sequence[str], evidence_ids: set[str]) -> AgentPlan:
+    """Parse and validate Qwen's plan; never accept invented genes or evidence."""
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Qwen did not return a JSON agent plan")
+    try:
+        item = json.loads(raw[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError("Qwen returned invalid JSON for the agent plan") from exc
+    genes = [str(g).upper() for g in item.get("genes", [])]
+    allowed = {str(g).upper() for g in valid_genes}
+    if not genes or not set(genes).issubset(allowed):
+        raise ValueError("Qwen agent plan contains genes outside the resolved task")
+    selected = [str(value) for value in item.get("selected_evidence", [])]
+    if not set(selected).issubset(evidence_ids):
+        raise ValueError("Qwen agent plan references evidence that was not retrieved")
+    confidence = float(item.get("confidence", 0.0))
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError("Qwen confidence must be between 0 and 1")
+    return AgentPlan(genes, str(item.get("perturbation_type", "unspecified")), selected,
+                     confidence, str(item.get("rationale", "")))
+
+
 def parse_task(data: Mapping[str, Any]) -> GeneTask:
     task = GeneTask(**{key: value for key, value in data.items() if key in GeneTask.__dataclass_fields__})
     if isinstance(task.genes, str):

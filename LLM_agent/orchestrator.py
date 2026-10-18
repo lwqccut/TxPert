@@ -8,7 +8,7 @@ from .gene_processor import GeneProcessor
 from .knowledge import KnowledgeGraph
 from .llm_client import LLMClient, QwenLocalClient
 from .rag import RAGIndex
-from .schemas import AgentResult, GeneTask
+from .schemas import AgentResult, GeneTask, parse_agent_plan
 
 
 class ResearchAgent:
@@ -16,8 +16,8 @@ class ResearchAgent:
         model_cfg = config.get("model", {})
         retrieval_cfg = config.get("retrieval", {})
         self.processor = processor or GeneProcessor()
-        self.kg = KnowledgeGraph(retrieval_cfg.get("kg_path"))
-        self.rag = RAGIndex(retrieval_cfg.get("rag_path"), retrieval_cfg.get("embedding_model", "BAAI/bge-m3"), model_cfg.get("cache_dir"))
+        self.kg = KnowledgeGraph(retrieval_cfg.get("kg_paths", []))
+        self.rag = RAGIndex(retrieval_cfg.get("rag_paths", []), retrieval_cfg.get("embedding_model", "BAAI/bge-m3"), model_cfg.get("cache_dir"))
         self.forward = build_forward_model(config.get("forward", {}))
         if model_cfg.get("enabled", False):
             self.llm = QwenLocalClient(
@@ -48,11 +48,20 @@ class ResearchAgent:
             self.forward.analysis_context(task.genes)
             if hasattr(self.forward, "analysis_context") else {}
         )
-        rationale = self.llm.complete(
-            "You are a cautious genomics research agent. Explain evidence and route the numerical prediction.",
-            f"Task: {task.prompt}\nGenes: {task.genes}\n"
+        evidence_payload = [{"id": f"E{index}", "kind": item.kind, "source": item.source,
+                             "text": item.text, "score": item.score}
+                            for index, item in enumerate(evidence)]
+        raw_plan = self.llm.complete(
+            "You are a cautious genomics research agent. Return JSON only with keys: "
+            "genes (a subset of the resolved genes), perturbation_type, selected_evidence "
+            "(IDs only), confidence (0 to 1), rationale. Never invent genes, IDs, or evidence.",
+            f"Task: {task.prompt}\nResolved genes: {task.genes}\n"
             f"Expression profile (selected genes and summary only): {expression_profile}\n"
-            f"Evidence: {[item.text for item in evidence]}",
+            f"Evidence: {evidence_payload}",
         )
-        prediction = self.forward(task.control_expression, task.perturbation_ids, {"evidence": evidence, "rationale": rationale})
-        return AgentResult(task, prediction, "txpert-checkpoint", rationale, evidence)
+        plan = parse_agent_plan(raw_plan, task.genes, {item["id"] for item in evidence_payload})
+        prediction = self.forward(task.control_expression, task.perturbation_ids, {
+            "evidence": evidence, "plan": plan,
+        })
+        return AgentResult(task, prediction, "txpert-checkpoint", plan.rationale, evidence,
+                           {"agent_confidence": plan.confidence})

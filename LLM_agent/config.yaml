@@ -8,8 +8,13 @@ model:
   temperature: 0.0
   auto_install: true
 retrieval:
-  kg_path: ./LLM_agent/data/kg_edges.csv
-  rag_path: ./LLM_agent/data/documents.jsonl
+  # Existing TxPert resources only; no generated/example corpus is used.
+  kg_paths:
+    - data/graphs/string/v11.5.parquet
+    - data/graphs/go/go_top_50.csv
+  rag_paths:
+    - README.md
+    - cache/Readme.md
   embedding_model: BAAI/bge-m3
   top_k: 8
 forward:

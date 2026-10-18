@@ -3,25 +3,48 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .schemas import Evidence
 
 
 class RAGIndex:
-    def __init__(self, path: str | Path | None = None, embedding_model: str = "BAAI/bge-m3", cache_dir: str | None = None):
+    def __init__(self, paths: str | Path | Sequence[str | Path] | None = None, embedding_model: str = "BAAI/bge-m3", cache_dir: str | None = None):
         self.documents: list[dict[str, Any]] = []
         self.encoder = None
-        if path and Path(path).exists():
-            self._load(Path(path))
+        if paths is None:
+            paths = []
+        elif isinstance(paths, (str, Path)):
+            paths = [paths]
+        for path in paths:
+            path = Path(path)
+            if not path.exists():
+                raise FileNotFoundError(f"RAG corpus file not found: {path}")
+            self._load(path)
         self._load_encoder(embedding_model, cache_dir)
 
     def _load(self, path: Path) -> None:
         if path.suffix.lower() == ".jsonl":
             with path.open(encoding="utf-8") as handle:
                 self.documents = [json.loads(line) for line in handle if line.strip()]
+        elif path.suffix.lower() in {".md", ".txt", ".rst"}:
+            words = path.read_text(encoding="utf-8", errors="ignore").split()
+            for start in range(0, len(words), 350):
+                text = " ".join(words[start:start + 350])
+                if text:
+                    self.documents.append({"text": text, "source": str(path), "metadata": {"offset": start}})
+        elif path.suffix.lower() == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError as exc:
+                raise RuntimeError("pypdf is required to index PDF literature") from exc
+            reader = PdfReader(str(path))
+            for number, page in enumerate(reader.pages, 1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    self.documents.append({"text": text, "source": str(path), "metadata": {"page": number}})
         else:
-            self.documents = [{"text": line.strip(), "source": path.name} for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            raise ValueError(f"Unsupported RAG corpus format: {path.suffix}")
 
     def _load_encoder(self, model_name: str, cache_dir: str | None) -> None:
         if not model_name or model_name == "__offline__":

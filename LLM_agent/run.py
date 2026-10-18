@@ -21,7 +21,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Qwen + KG + BGE-M3 + TxPert agent")
     parser.add_argument("--config", type=Path, default=Path("LLM_agent/config.yaml"))
-    parser.add_argument("--input", type=Path, default=Path("LLM_agent/example_request.json"))
+    parser.add_argument("--input", type=Path, required=True, help="JSON task with prompt/cell_type/genes")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     config = load_yaml(args.config)

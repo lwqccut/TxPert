@@ -1,5 +1,0 @@
-{
-  "prompt": "Predict the perturbation effect of TP53 in K562 cells and explain the mechanism.",
-  "cell_type": "K562",
-  "genes": ["TP53"]
-}

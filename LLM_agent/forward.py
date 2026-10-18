@@ -6,13 +6,6 @@ from typing import Any, Mapping, Sequence
 import copy
 
 
-class DemoForwardModel:
-    """Deterministic fallback so the complete pipeline runs without a checkpoint."""
-    def __call__(self, control: Sequence[float], perturbation_ids: Sequence[int], context: Mapping[str, Any]) -> list[float]:
-        shift = 0.01 * sum(perturbation_ids)
-        return [float(value) + shift for value in control]
-
-
 class TxPertCheckpointModel:
     """Run the released TxPert model on the repository's processed dataset.
 

@@ -5,7 +5,6 @@ entrypoints.  It can be run with ``python -m LLM_agent.cli`` from the repository
 root and uses a deterministic planner when no LLM endpoint is configured.
 """
 
-from .agent import LLMAgent, AgentRequest, AgentResponse
 from .orchestrator import ResearchAgent
 
-__all__ = ["LLMAgent", "AgentRequest", "AgentResponse", "ResearchAgent"]
+__all__ = ["ResearchAgent"]
