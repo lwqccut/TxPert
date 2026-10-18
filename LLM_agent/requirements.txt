@@ -1,0 +1,6 @@
+# Core agent dependencies.  The existing TxPert environment already provides torch.
+transformers>=4.45
+accelerate>=0.34
+sentence-transformers>=3.0
+pyyaml>=6.0
+pandas>=2.0

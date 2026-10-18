@@ -1,0 +1,5 @@
+# Large local model caches and generated results must stay out of Git.
+models/
+runs/
+__pycache__/
+*.pyc

@@ -1,0 +1,20 @@
+# One-command defaults.  Set model.enabled=true to load Qwen locally.
+model:
+  name: Qwen/Qwen2.5-7B-Instruct
+  cache_dir: ./LLM_agent/models
+  enabled: true
+  device: auto
+  max_new_tokens: 768
+  temperature: 0.0
+  auto_install: true
+retrieval:
+  kg_path: ./LLM_agent/data/kg_edges.csv
+  rag_path: ./LLM_agent/data/documents.jsonl
+  embedding_model: BAAI/bge-m3
+  top_k: 8
+forward:
+  backend: demo  # demo, checkpoint, or python_callable
+  checkpoint: ./forward_model/runs/model.pt
+  device: auto
+output:
+  dir: ./LLM_agent/runs
