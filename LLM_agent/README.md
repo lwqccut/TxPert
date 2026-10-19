@@ -78,3 +78,15 @@ python -m LLM_agent.run --input task.json --output LLM_agent/runs/prediction.jso
 默认使用 `K562_unseen_pert_gat.ckpt`。如果要使用自己在 `forward_model/` 训练的模型，将 `forward.backend` 改为 `custom_forward`，并使用更新后的训练脚本生成带有 `model_spec.edge_indices` 的 checkpoint；两种 checkpoint 不能混用。
 
 如果使用你自己在 `forward_model/` 训练的 checkpoint，将 `forward.backend` 改为 `custom_forward`，并填写 checkpoint 路径；项目会拒绝缺少图结构元数据的权重，避免产生不可复现的错误预测。
+
+如果服务器无法访问 Hugging Face，可以在可联网机器下载 Qwen/BGE 后，将目录复制到服务器。`bootstrap` 支持本地目录：
+
+```bash
+python -m LLM_agent.bootstrap \
+  --qwen /path/to/local/Qwen2.5-3B-Instruct \
+  --bge /path/to/local/bge-m3 \
+  --cache-dir LLM_agent/models \
+  --no-install
+```
+
+同时把 `config.yaml` 中的 `model.name` 和 `retrieval.embedding_model` 改为对应的本地目录。

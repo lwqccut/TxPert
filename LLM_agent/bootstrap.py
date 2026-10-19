@@ -20,9 +20,15 @@ def install_requirements(requirements: Path) -> None:
 def download_models(qwen: str, cache_dir: Path, bge: str | None) -> None:
     from huggingface_hub import snapshot_download
     cache_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_download(qwen, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
+    if Path(qwen).exists():
+        print(f"Using local Qwen model: {qwen}")
+    else:
+        snapshot_download(qwen, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
     if bge:
-        snapshot_download(bge, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
+        if Path(bge).exists():
+            print(f"Using local BGE model: {bge}")
+        else:
+            snapshot_download(bge, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
 
 
 def main() -> None:
