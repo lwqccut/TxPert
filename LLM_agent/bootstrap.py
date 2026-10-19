@@ -13,6 +13,17 @@ import sys
 from pathlib import Path
 
 
+# Some mirrors expose macOS metadata files (for example ``.DS_Store``) with
+# broken permissions.  They are never needed by Transformers or
+# sentence-transformers, so exclude them from model snapshots.
+_MODEL_IGNORE_PATTERNS = [
+    ".DS_Store",
+    "*.DS_Store",
+    "**/.DS_Store",
+    "**/*.DS_Store",
+]
+
+
 def install_requirements(requirements: Path) -> None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(requirements)])
 
@@ -23,12 +34,22 @@ def download_models(qwen: str, cache_dir: Path, bge: str | None) -> None:
     if Path(qwen).exists():
         print(f"Using local Qwen model: {qwen}")
     else:
-        snapshot_download(qwen, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
+        snapshot_download(
+            qwen,
+            cache_dir=str(cache_dir / "huggingface"),
+            resume_download=True,
+            ignore_patterns=_MODEL_IGNORE_PATTERNS,
+        )
     if bge:
         if Path(bge).exists():
             print(f"Using local BGE model: {bge}")
         else:
-            snapshot_download(bge, cache_dir=str(cache_dir / "huggingface"), resume_download=True)
+            snapshot_download(
+                bge,
+                cache_dir=str(cache_dir / "huggingface"),
+                resume_download=True,
+                ignore_patterns=_MODEL_IGNORE_PATTERNS,
+            )
 
 
 def main() -> None:
