@@ -1,0 +1,49 @@
+# LLM_agent_plus reuses the data, graph and model caches owned by LLM_agent.
+# Only the generated feature/checkpoint artifacts live in this package.
+model:
+  name: Qwen/Qwen2.5-7B-Instruct
+  cache_dir: ./LLM_agent/models
+  device: auto
+  dtype: float16
+  max_new_tokens: 512
+  temperature: 0.0
+  auto_install: true
+
+retrieval:
+  # Existing TxPert knowledge graph resources.
+  kg_paths:
+    - data/graphs/string/v11.5.parquet
+    - data/graphs/go/go_top_50.csv
+  embedding_model: BAAI/bge-m3
+  top_k: 8
+
+key_gene_selection:
+  # The LLM is called only for this many high-signal perturbation genes.
+  max_key_genes: 256
+  # Scores combine perturbation response, Pharos prior and perturbation frequency.
+  response_weight: 0.60
+  pharos_weight: 0.25
+  frequency_weight: 0.15
+
+forward:
+  datamodule:
+    mode: inference
+    task_type: K562_single_cell_line
+    match_cntr: true
+    avg_cntr: true
+    embed_cntr: true
+    obsm_key: raw
+
+output:
+  feature_path: ./LLM_agent_plus/runs/key_gene_features.pt
+  model_path: ./LLM_agent_plus/runs/key_gene_forward.pt
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 0.001
+  freeze_base: false
+  views:
+    - string
+    - go
+
