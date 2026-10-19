@@ -4,6 +4,7 @@ model:
   cache_dir: ./LLM_agent/models
   enabled: true
   device: auto
+  dtype: float16
   max_new_tokens: 768
   temperature: 0.0
   auto_install: true

@@ -45,13 +45,15 @@ class QwenLocalClient:
     loading keeps CLI help, data checks and offline tests fast.
     """
     def __init__(self, model_name: str, cache_dir: str | None = None, device: str = "auto",
-                 max_new_tokens: int = 768, temperature: float = 0.0, auto_install: bool = True):
+                 max_new_tokens: int = 768, temperature: float = 0.0, auto_install: bool = True,
+                 dtype: str = "float16"):
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.auto_install = auto_install
+        self.dtype = dtype
         self._tokenizer = None
         self._model = None
 
@@ -70,6 +72,11 @@ class QwenLocalClient:
         model_kwargs = dict(kwargs)
         if self.device == "auto":
             model_kwargs["device_map"] = "auto"
+        import torch
+        if self.dtype == "float16" and torch.cuda.is_available():
+            model_kwargs["torch_dtype"] = torch.float16
+        elif self.dtype == "bfloat16" and torch.cuda.is_available():
+            model_kwargs["torch_dtype"] = torch.bfloat16
         self._model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
         if self.device != "auto":
             self._model.to(self.device)

@@ -31,6 +31,7 @@ def build_features(config: dict, output: Path) -> None:
         model_cfg.get("name", "Qwen/Qwen2.5-7B-Instruct"), model_cfg.get("cache_dir"),
         model_cfg.get("device", "auto"), int(model_cfg.get("max_new_tokens", 512)),
         float(model_cfg.get("temperature", 0.0)), bool(model_cfg.get("auto_install", True)),
+        str(model_cfg.get("dtype", "float16")),
     )
     try:
         from sentence_transformers import SentenceTransformer
