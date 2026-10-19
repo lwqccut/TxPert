@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from gspp.data.datamodule import PertDataModule
+from gspp.data.graphmodule import GSPGraph
 from LLM_agent.knowledge import KnowledgeGraph
 from LLM_agent.llm_client import QwenLocalClient
 
@@ -95,6 +96,29 @@ def select_key_genes(dm: PertDataModule, selection_cfg: dict[str, Any]) -> list[
     return candidates[:max_key_genes]
 
 
+def _forward_graph_edges(dm: PertDataModule) -> tuple[set[tuple[int, int]], dict[str, int]]:
+    """Return edges retained by the current STRING/GO forward views.
+
+    The forward model reduces both resources to perturbation nodes and keeps
+    top-20 edges per target.  This set lets the LLM prompt distinguish
+    evidence already represented in the model from evidence that the model's
+    graph construction may have dropped.
+    """
+    graph = GSPGraph(dm.pert2id, dm.gene2id, {
+        name: {"graph_type": name, "reduce2perts": True, "mode": "top_20"}
+        for name in ("string", "go")
+    })
+    edges: set[tuple[int, int]] = set()
+    for edge_index, _, _ in graph.graph_dict.values():
+        edges.update(zip(edge_index[0].tolist(), edge_index[1].tolist()))
+    label_to_id = {
+        str(label).replace("+ctrl", "").upper(): int(index)
+        for label, index in dm.pert2id.items()
+        if int(index) >= 0
+    }
+    return edges, label_to_id
+
+
 def build_features(config: dict[str, Any], output: Path) -> None:
     retrieval = config.get("retrieval", {})
     model_cfg = config.get("model", {})
@@ -107,6 +131,7 @@ def build_features(config: dict[str, Any], output: Path) -> None:
     dm.setup("fit")
 
     selected = select_key_genes(dm, config.get("key_gene_selection", {}))
+    forward_edges, perturbation_ids = _forward_graph_edges(dm)
     kg = KnowledgeGraph(retrieval.get("kg_paths", []))
     qwen = QwenLocalClient(
         model_cfg.get("name", "Qwen/Qwen2.5-7B-Instruct"),
@@ -127,19 +152,54 @@ def build_features(config: dict[str, Any], output: Path) -> None:
     num_nodes = max(int(key) for key in dm.id2pert if int(key) >= 0) + 1
     texts: list[str] = []
     selected_ids: list[int] = []
+    graph_analysis: list[dict[str, Any]] = []
+    omitted_evidence: list[dict[str, Any]] = []
     top_k = int(retrieval.get("top_k", 8))
     for item in selected:
         gene = item["gene"]
         evidence = kg.query([gene], top_k)
-        evidence_text = "\n".join(entry.text for entry in evidence)
+        evidence_lines = []
+        gene_records = []
+        for entry in evidence:
+            source = str(entry.metadata.get("source", "")).upper()
+            target = str(entry.metadata.get("target", "")).upper()
+            source_id = perturbation_ids.get(source)
+            target_id = perturbation_ids.get(target)
+            represented = (
+                source_id is not None and target_id is not None
+                and (source_id, target_id) in forward_edges
+            )
+            record = {
+                "gene": gene, "source": source, "target": target,
+                "database": entry.metadata.get("database", entry.source),
+                "score": float(entry.score),
+                "represented_in_forward_graph": represented,
+                "source_is_perturbation_node": source_id is not None,
+                "target_is_perturbation_node": target_id is not None,
+            }
+            gene_records.append(record)
+            evidence_lines.append(
+                f"[{record['database']}; "
+                f"{'already represented' if represented else 'candidate omitted from forward graph'}] "
+                f"{entry.text}"
+            )
+            if not represented:
+                omitted_evidence.append(record)
+        evidence_text = "\n".join(evidence_lines)
+        graph_analysis.append({"gene": gene, "evidence": gene_records})
         prompt = (
             f"Key perturbation gene: {gene}\n"
             f"Cell type: {dm.test_cell_type}\n"
             f"Observed dataset signal: {item['response_signal']:.4f}\n"
+            "The forward model currently reduces STRING and GO to perturbation "
+            "nodes and retains only top-20 edges per target. Evidence marked "
+            "'candidate omitted from forward graph' may contain information the "
+            "forward graph does not represent.\n"
             f"Evidence from existing TxPert knowledge graphs:\n{evidence_text}\n"
-            "Summarize only the key gene associations, shared functional context, "
-            "and perturbation-relevant relationships supported by the evidence. "
-            "Do not invent mechanisms or numerical expression values."
+            "Summarize only evidence-backed key gene associations, shared "
+            "functional context, and perturbation-relevant relationships. Give "
+            "special attention to high-confidence candidate omitted relations, "
+            "but do not invent mechanisms or numerical expression values."
         )
         analysis = qwen.complete(
             "You are a cautious genomics knowledge analyst. Use only the supplied evidence.",
@@ -163,6 +223,9 @@ def build_features(config: dict[str, Any], output: Path) -> None:
         "embeddings": embeddings,
         "key_mask": key_mask,
         "selected_genes": selected,
+        "graph_analysis": graph_analysis,
+        "omitted_evidence": omitted_evidence,
+        "forward_graph_policy": "STRING+GO reduced to perturbation nodes, top_20 per target",
         "gene_to_id": {item["gene"]: item["perturbation_id"] for item in selected},
         "pert_to_id": {str(key): int(value) for key, value in dm.pert2id.items()},
         "num_nodes": num_nodes,

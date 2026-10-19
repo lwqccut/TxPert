@@ -12,6 +12,14 @@ Qwen only for the top `max_key_genes` genes, summarizes their existing STRING/GO
 evidence, and embeds the summaries with the existing BGE-M3 model. Unselected
 perturbations receive a zero vector and are marked in `key_mask`.
 
+The precompute step also reconstructs the current forward graph policy
+(STRING/GO reduced to perturbation nodes with top-20 edges per target). Each
+retrieved evidence record is marked as already represented or a candidate
+omitted relation. The prompt asks Qwen to prioritize high-confidence omitted
+relations, and the artifact stores `graph_analysis` and `omitted_evidence` for
+inspection. These summaries are supplied to training as the special input
+branch; the original graph views are not overwritten.
+
 The training model keeps the original STRING and GO views. The selected-gene
 embedding is a frozen perturbation-level special input, projected and gated by
 the control expression, then decoded as a residual correction to the original
