@@ -1,0 +1,23 @@
+# Use an OpenAI-compatible local server, for example vLLM.
+endpoint: http://127.0.0.1:8000/v1
+model: Qwen/Qwen3-32B
+# Required for live runs: exact Hugging Face commit used by the model server.
+revision: null
+# Document the actual server precision/quantization; this client cannot verify it.
+precision: bfloat16
+api_key_env: REACTIVE_LLM_API_KEY
+temperature: 0.0
+seed: 1
+max_tokens: 1024
+timeout_seconds: 90
+interval_steps: 500
+history_size: 8
+lr_factor_min: 0.5
+lr_factor_max: 1.2
+lr_min: 0.000001
+lr_max: 0.01
+weight_decay_max: 0.1
+# Existing Trainer clipping settings take precedence at initialization.
+clip_norm: 1.0
+clip_min: 0.1
+clip_max: 10.0
