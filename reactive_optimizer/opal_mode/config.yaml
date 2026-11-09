@@ -1,0 +1,18 @@
+# Independent from the bounded-action controller and its validation rollback.
+# Checks are every N updates; scheduled decisions are at interval_steps multiples.
+every: 50
+interval_steps: 500
+max_decisions: 100
+blocking: true
+trial_steps: 20
+snapshot_limit_gb: 2.0
+checkpoint_every: 500
+max_tokens: 8192
+max_source_chars: 48000
+max_context_chars: 120000
+preflight_timeout_seconds: 60
+preflight_memory_gb: 8
+preflight_max_numel: 20000000
+preflight_steps: 4
+# Default runtime remains FP32, one training device, no external LR scheduler.
+goal: "Train the original TxPert perturbation predictor; improve held-out validation expression MSE within the fixed training budget. Never access test data."

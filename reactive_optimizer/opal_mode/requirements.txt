@@ -1,0 +1,2 @@
+# Separate optional dependency; does not replace TxPert's torch/environment lock.
+opal-optimizer @ git+https://github.com/xingjian-bai/opal.git@e999c21ee1a05891ea09d7d29bf2cd6597ca686b

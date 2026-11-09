@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--engine', choices=('bounded', 'opal'), default='bounded')
+    parser.add_argument('--opal-config', default=str(Path(__file__).with_name('opal_mode') / 'config.yaml'))
     parser.add_argument('--config', default='config-gat', help='Name in original configs/')
     parser.add_argument('--agent-config', default=str(Path(__file__).with_name('config.yaml')))
     parser.add_argument('--revision', help='Exact model-weight commit served by the LLM endpoint')
@@ -37,6 +39,7 @@ def main():
     if args.endpoint:
         agent['endpoint'] = args.endpoint
     validate_config(agent)
+    opal_options = yaml.safe_load(Path(args.opal_config).read_text()) if args.engine == 'opal' else None
     url = urlsplit(agent['endpoint'])
     if url.scheme not in ('http', 'https') or url.username or url.password or url.query or url.fragment:
         parser.error('Endpoint must be HTTP(S), with no embedded credentials or query')
@@ -48,7 +51,7 @@ def main():
     if config['mode'] != 'train' or config['model']['model_type'] != 'txpert':
         parser.error('This entrypoint requires mode=train and the original txpert model')
     if args.print_config:
-        print(OmegaConf.to_yaml(OmegaConf.create({'txpert': config, 'agent': agent})))
+        print(OmegaConf.to_yaml(OmegaConf.create({'txpert': config, 'agent': agent, 'engine': args.engine, 'opal': opal_options})))
         return
     os.chdir(ROOT)
     # Writable caches, without changing system/user configuration.
@@ -63,21 +66,29 @@ def main():
     from .predictor import ReactivePredictor
     from .controller import ReactiveController
 
+    if args.engine == 'opal':
+        from .opal_mode.integration import OpalPredictor, OpalAudit
+        from .opal_mode.backend import validate_options
+        validate_options(opal_options)
     trainer_args = copy.deepcopy(config.get('trainer', {}))
     if trainer_args.get('devices', 1) not in (1, [0]) or trainer_args.get('num_nodes', 1) != 1 or trainer_args.get('strategy', 'auto') != 'auto':
-        parser.error('Phase 1 supports one device and strategy=auto only')
+        parser.error('This entrypoint supports one device and strategy=auto only')
     if trainer_args.get('gradient_clip_algorithm', 'norm') != 'norm':
         parser.error('Reactive clipping requires gradient_clip_algorithm=norm')
     if trainer_args.get('gradient_clip_val') is not None:
         agent['clip_norm'] = float(trainer_args['gradient_clip_val'])
         validate_config(agent)
+    if args.engine == 'opal' and str(trainer_args.get('precision', '32-true')) not in ('32', '32-true'):
+        parser.error('OPAL mode currently supports FP32 only')
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    prompt_path = Path(__file__).with_name('prompt.txt')
+    prompt_path = (Path(__file__).with_name('opal_mode') / 'prompt.txt' if args.engine == 'opal'
+                   else Path(__file__).with_name('prompt.txt'))
     prompt = prompt_path.read_text()
     (output / 'prompt.txt').write_text(prompt)
     manifest = {
         'txpert': config, 'agent': agent, 'baseline': args.baseline,
+        'engine': args.engine, 'opal': opal_options,
         'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
         'source_status': subprocess.check_output(['git', 'status', '--porcelain'], text=True),
         'python': sys.version, 'torch': torch.__version__,
@@ -97,7 +108,8 @@ def main():
     dm.prepare_data()
     graph = GSPGraph(pert2id=dm.pert2id, gene2id=dm.gene2id, **config['graph'])
     use_gpu = torch.cuda.is_available() and trainer_args.get('accelerator') != 'cpu'
-    model = ReactivePredictor(
+    predictor_class = OpalPredictor if args.engine == 'opal' else ReactivePredictor
+    model = predictor_class(
         input_dim=dm.input_dim, output_dim=dm.output_dim, adata_output_dim=dm.adata_output_dim,
         graph=graph, model_args=copy.deepcopy(config['model']), device='cuda' if use_gpu else 'cpu',
         lr=config.get('lr', 1e-3), min_lr=config.get('min_lr', 0.0),
@@ -105,7 +117,11 @@ def main():
         weight_decay=config.get('weight_decay', 0.0),
         match_cntr_for_eval=config.get('match_cntr_for_eval', True),
     )
-    controller = ReactiveController(agent, output, prompt, enabled=not args.baseline)
+    if args.engine == 'opal':
+        model.configure_opal(agent, opal_options, output, keep=args.baseline)
+        controller = OpalAudit(agent, opal_options, output, prompt, keep=args.baseline)
+    else:
+        controller = ReactiveController(agent, output, prompt, enabled=not args.baseline)
     trainer_args.setdefault('accelerator', 'gpu' if use_gpu else 'cpu')
     trainer_args.setdefault('devices', 1)
     trainer_args['default_root_dir'] = str(output)
