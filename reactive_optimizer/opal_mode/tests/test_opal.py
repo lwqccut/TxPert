@@ -25,7 +25,7 @@ PROMPT = (ROOT/'opal_mode/prompt.txt').read_text()
 
 
 class FixtureClient(ChatClient):
-    def complete(self, payload):
+    def complete(self, payload, timeout=None):
         return {'model':'fixture-not-a-real-llm', 'choices':[{'message':{'content':json.dumps({
             'decision':'edit','reason':'fixture: replace AdamW with SGD; reset incompatible state',
             'files':{'updater.py':UPDATER,'analysis.py':ANALYSIS}})}}]}

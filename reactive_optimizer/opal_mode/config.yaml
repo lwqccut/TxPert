@@ -16,3 +16,10 @@ preflight_max_numel: 20000000
 preflight_steps: 4
 # Default runtime remains FP32, one training device, no external LR scheduler.
 goal: "Train the original TxPert perturbation predictor; improve held-out validation expression MSE within the fixed training budget. Never access test data."
+# Multi-turn coding agent; json works without a server-specific tool parser.
+# openai uses native function calling and requires a matching server tool parser.
+agent_protocol: json
+max_agent_turns: 12
+max_tool_calls: 32
+decision_timeout_seconds: 600
+tool_result_chars: 12000

@@ -83,6 +83,7 @@ def main(job_path):
         raise ValueError('param_groups must contain each parameter exactly once')
     analysis = programs.load(job['proposed'], 'analysis.py', 'analysis', Path.cwd())
     memory_state = {}
+    reports = []
     for index in range(options['preflight_steps']):
         grads = gradients()
         weights = {n: p.detach().clone() for n, p in named}
@@ -94,6 +95,7 @@ def main(job_path):
         with torch.no_grad():
             report = analysis.analyze(obs, memory_state)
         json.dumps(report, allow_nan=False)
+        reports.append({'probe_step': index+2, 'analysis': report})
         if (any(not torch.equal(weights[n], p) for n, p in named)
                 or any(not torch.equal(original_grads[n], p.grad) for n, p in named)
                 or not equal(original_state, candidate.state_dict())):
@@ -112,7 +114,7 @@ def main(job_path):
         candidate.load_state_dict(restored)
         if not equal(state, candidate.state_dict()):
             raise ValueError('Optimizer state roundtrip failed')
-    print(json.dumps({'passed': True, 'steps': options['preflight_steps'],
+    print(json.dumps({'passed': True, 'steps': options['preflight_steps'], 'reports': reports,
                       'scope': 'synthetic CPU contract/state checks; not proof of effectiveness or isolation'}))
 
 

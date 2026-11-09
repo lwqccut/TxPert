@@ -8,13 +8,17 @@
 
 - 使用原 TxPert 模型、损失、图和 Hydra 配置，以及第一阶段的整数图索引适配、参数分组、验证集隔离。
 - 官方 `opal.wrap` 包装 AdamW。未修改程序前执行原优化器，`keep` 基线不调用 LLM。
-- Qwen 可以返回完整 `analysis.py`、`updater.py`，不再受学习率等四种动作的菜单限制。
+- Qwen 可以多轮读取报告、修改 `analysis.py`、`updater.py` 和 `helper_*.py`，运行检查、读取错误并在同一次决策内修复，不再受学习率等四种动作的菜单限制。
 - `analysis.py` 自行测量参数/梯度/优化器状态、维护诊断 memory，输出报告或 wake 请求。
 - `updater.py` 可以实现不同算法、分组策略、动量处理和设备兼容的精度策略。编程范围遵守 OPAL precision contract，不允许改变模型参数/梯度 dtype 或设备。
 - 官方引擎按更新边界加载代码，管理版本、试运行、程序状态、故障恢复、分析 memory 和审计记录。
 - `blocking: true` 同步等待；`false` 使用官方异步机制，训练继续，响应在后续更新边界应用。记录请求与实际应用步数；短训练可能在首次响应前结束。
 
-Qwen 后端使用 OpenAI-compatible chat-completions JSON 接口，每次决策一轮代码生成；它没有 Claude Code 的 shell/文件浏览工具。后端主动提供当前代码、OPAL 系统提示、参数形状/初始优化器配置、训练消息、最近失败记录，以及限长的 inbox/reference 文本。超出上下文预算的附加文件可能省略；完整实际请求会保存。不允许创建额外 helper 文件。这比官方通用 coding agent 的工具范围窄，但确实支持重写诊断与更新算法，而非把代码替换成固定动作菜单。
+Qwen 后端现在是多轮编程 Agent，使用 OpenAI-compatible chat-completions 接口。每次决策可调用 `list_files`、`read_file`、`write_files`、`run_diagnostics`、`run_preflight` 和 `finish`。模型主动读取官方 inbox/reference、诊断报告和错误日志，在暂存区编辑、测试、修复，最后提交或保持不变。只有最终提交的合格候选进入官方试运行。
+
+默认 `agent_protocol: json` 使用 JSON 工具请求，不要求模型服务安装特定工具解析器；`openai` 使用原生 function calling，需要服务支持对应的工具调用格式。两种传输执行相同的实际工具。每个决策默认最多 12 轮模型请求、32 次工具调用、600 秒；每轮最多输出 8192 token。因此 **500 步决策一次不再等于 500 步只发一次 LLM 请求**。失败修复会增加调用和等待时间，可通过第二阶段 YAML 调整预算。超过预算且尚未提交时保留原程序。
+
+当前提供源码、文件清单、官方提示、参数形状、训练消息和近期决策；报告由 Agent 按需分段读取。上下文超限时按完整工具交互移除最早消息，实际每轮请求和移除计数均保存。仍与论文的通用 coding-agent 工具环境有差异：没有任意 shell，编辑限于两个入口和根目录 `helper_*.py`，诊断工具执行合成 CPU 探针。真实训练的自定义测量通过发布 `analysis.py` 后由官方引擎执行，再反馈给后续决策。这些限制不应表述为工具环境逐项等价。
 
 ## 安装和运行
 
@@ -51,13 +55,14 @@ python -m reactive_optimizer.train --engine opal \
 
 ## 候选代码如何进入训练
 
-1. 保存完整 Qwen 请求、权重 revision/precision 声明和完整响应。
-2. 校验 JSON、文件路径、源码大小、语法、必需接口与 import 范围；将官方 boundary 检查的发现作为拒绝条件。
-3. 在独立 CPU 子进程中，用与真实模型同形状的随机参数/梯度执行有限步预检。限制超时、CPU 时间、内存、文件大小，不向子进程传递认证环境变量。
-4. 预检检查 build 是否改坏共享对象、analysis 是否修改参数/梯度/优化器、参数 shape/dtype/device、数值有限性、参数覆盖、状态可序列化与 load_state_dict 往返。
-5. 通过后才写入官方工作目录。官方 OPAL 在真实训练更新边界构造 updater，并进入 `trial_steps` 窗口。
+1. 保存模型身份及每轮完整请求、响应、工具参数与结果。
+2. Agent 读取训练报告并暂存源码。校验路径、大小、语法、必需接口与 import 范围；将官方 boundary 检查的发现作为拒绝条件。
+3. Agent 调用预检，在独立 CPU 子进程中用与真实模型同形状的随机参数/梯度执行有限步检查。限制超时、CPU 时间、内存、文件大小，不向子进程传递认证环境变量。
+4. 检查 build 是否改坏共享对象、analysis 是否修改参数/梯度/优化器、参数 shape/dtype/device、数值有限性、参数覆盖和状态保存恢复。结果和诊断报告立即反馈到同一次决策；Agent 可读日志、修改和重测。
+5. 最终 `finish(submit)` 要求预检通过的代码哈希与当前暂存版本一致。编辑后必须重测；临时诊断通过不能代替候选预检。中断、超时、未最终提交不会发布暂存代码。
+6. 提交后官方 OPAL 在真实训练更新边界构造 updater，进入 `trial_steps` 窗口。
 
-预检使用合成 CPU 状态，不是当前完整训练状态；不能证明 GPU 性能、所有分支正确或预测效果提高。大模型超过 `preflight_max_numel` 时拒绝候选，需要操作者调整 CPU 预算。被拒绝的诊断和失败日志尾部会提供给下一次 Qwen 决策，不会自动强行执行。
+预检使用合成 CPU 状态，不是当前完整训练状态；不能证明 GPU 性能、所有分支正确或预测效果提高。大模型超过 `preflight_max_numel` 时拒绝候选，需要操作者调整 CPU 预算。失败日志立即反馈，修复仍须通过检查。
 
 **子进程和静态检查不是安全沙箱。** 当前执行环境无法启用所测的 bwrap 网络隔离。与官方 OPAL 一样，实际生成的 Python 程序在训练进程内运行，拥有该进程权限；静态启发式可被间接访问绕过。仅应在隔离的科研训练环境使用代码模式，且不放无关凭证。`--engine opal` 明确选择执行生成代码；默认 `--engine bounded` 保持有限动作模式。代码模式没有宣称具备任意 Python 的强隔离。
 
@@ -77,7 +82,9 @@ python -m reactive_optimizer.train --engine opal \
 - `opal-settings.json`：上游提交、版本、计划决策步数、参数形状与配置；
 - `opal/workspace/analysis.py` 和 `updater.py`：官方工作区（以 programs 版本和事件日志确认实际应用）；
 - `opal/programs/vNNN/`：代码版本；
-- `opal/decisions/NNN/`：官方消息，以及 `qwen-request.json`、`qwen-response.json`、`qwen-result.json`、`candidate.json`、`preflight.log`；
+- `opal/decisions/NNN/turns/TTT/`：每轮 `request.json`、`response.json`、`tool-result.json` 或 `error.json`；
+- 同一决策的 `checks/CCC/`：每次检查的完整候选与 `preflight.log`；`transcript.json` 保存交互，`qwen-result.json` 保存决策、轮次、工具/检查次数、服务返回的累计 token 用量和上下文省略计数；没有 usage 的服务不能据此计算真实 token 成本；
+- 兼容摘要 `qwen-request.json` 是首轮请求，`qwen-response.json` 是最后响应，`preflight.log` 是最后检查日志；以逐轮和逐次记录为准；
 - 官方 `events.jsonl`、训练/指标日志和报告，记录实际应用和失败恢复；
 - `opal-checkpoints/step-*.ckpt`、最佳/last/final checkpoint：模型、OPAL 代码/优化器/分析状态、Lightning 训练状态和 RNG。
 
@@ -90,6 +97,8 @@ python -m reactive_optimizer.train --engine opal \
 
 使用相同 engine、模型、数据、Agent/OPAL 配置、提示词和权重 revision 恢复；只加载可信 checkpoint，其中包含可执行代码。不要把 bounded 模式 checkpoint 当成 OPAL checkpoint。建议在 epoch 边界恢复；不保证数据游标、GPU 运算或 LLM 输出逐位重现。退出时可能有未应用的异步回答，以实际应用日志为准。
 
+多轮后端改变了提示词和配置身份，旧单轮 OPAL checkpoint 会被配置一致性检查拒绝，不能直接当作同一实验续跑。当前正在运行的 bounded 实验不自动切换模式；新 OPAL 对照使用独立输出目录。
+
 ## 验证范围
 
 ```bash
@@ -97,6 +106,6 @@ python -m unittest discover -s reactive_optimizer/opal_mode/tests -p 'test_*.py'
 python -m unittest discover -s reactive_optimizer/tests -v
 ```
 
-本次 CPU 验证使用原 GAT 配置和合成小图/表达数据。独立进程 20 步 keep 对照逐步损失、最终权重完全一致。动态代码测试使用确定性 fixture，验证改写两个程序、AdamW→SGD 算法切换、状态保存恢复、预检拒绝和官方首次试运行故障恢复。不是 Qwen3-32B 成功生成程序或真实生物数据收益的证明。
+CPU 验证使用原 GAT 配置和合成小图/表达数据。独立进程 20 步 keep 对照逐步损失、最终权重完全一致。动态代码测试使用确定性 fixture，验证改写两个程序、AdamW→SGD 算法切换、状态保存恢复、预检拒绝和官方首次试运行故障恢复。多轮测试覆盖同次决策失败修复、辅助模块、临时诊断、JSON/原生工具协议、预算耗尽、取消、过期预检和路径限制。不是 Qwen3-32B 成功生成程序或真实生物数据收益的证明。
 
 下一步在你的 GPU 上先跑 keep 基线和少量实际 Qwen 决策，核查代码版本确实应用、延迟和显存；再进行固定数据划分、相同预算、多种子的 bounded / OPAL / 常规优化对照。论文中的图像/语言建模结果不能直接作为 TxPert 收益证据。

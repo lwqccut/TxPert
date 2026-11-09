@@ -112,12 +112,12 @@ class ChatClient:
             'chat_template_kwargs': {'enable_thinking': False},
         }
 
-    def complete(self, payload):
+    def complete(self, payload, timeout=None):
         headers = {'Content-Type': 'application/json'}
         key = os.environ.get(self.cfg['api_key_env'])
         if key:
             headers['Authorization'] = f'Bearer {key}'
         request = Request(self.cfg['endpoint'].rstrip('/') + '/chat/completions',
                           data=json.dumps(payload).encode(), headers=headers)
-        with urlopen(request, timeout=self.cfg['timeout_seconds']) as response:
+        with urlopen(request, timeout=self.cfg['timeout_seconds'] if timeout is None else timeout) as response:
             return json.load(response)
