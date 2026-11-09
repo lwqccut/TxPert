@@ -16,7 +16,7 @@ from reactive_optimizer.core import group_parameters, validate_action, validate_
 from reactive_optimizer.controller import ReactiveController
 
 BASE = Path(__file__).resolve().parents[1]
-CFG = yaml.safe_load((BASE / 'config.yaml').read_text())
+CFG = {**yaml.safe_load((BASE / 'config.yaml').read_text()), 'feedback_enabled': False}
 PROMPT = (BASE / 'prompt.txt').read_text()
 
 
@@ -168,6 +168,38 @@ class TxPertIntegrationTests(unittest.TestCase):
             self.assertEqual(resumed.last_step, 6)
             self.assertEqual(len(list(resume_dir.glob('step-*'))), 1)
             self.assertAlmostEqual(trainer2.optimizers[0].param_groups[1]['lr'], 0.001*0.8**3)
+
+    def test_feedback_trial_resumes_through_real_lightning_checkpoint(self):
+        torch.set_num_threads(2)
+        cfg = {**CFG, 'feedback_enabled': True, 'interval_steps': 2,
+               'feedback_min_steps': 1, 'feedback_max_evaluations': 2,
+               'feedback_cooldown_steps': 100}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = ReactiveController(cfg, root, PROMPT, client=FakeClient(cfg, PROMPT))
+            trainer = Trainer(accelerator='cpu', devices=1, max_steps=6, max_epochs=3,
+                              logger=False, enable_checkpointing=False, enable_progress_bar=False,
+                              num_sanity_val_steps=0, callbacks=[controller])
+            trainer.fit(self.model(), self.loaders(), self.loaders())
+            self.assertIsNotNone(controller.trial)
+            self.assertEqual(controller.trial['step'], 6)
+            checkpoint = root / 'pending.ckpt'
+            trainer.save_checkpoint(checkpoint)
+            restored_dir = root / 'restored'
+            restored_dir.mkdir()
+            restored = ReactiveController(cfg, restored_dir, PROMPT, client=FakeClient(cfg, PROMPT))
+            trainer2 = Trainer(accelerator='cpu', devices=1, max_steps=12, max_epochs=4,
+                               logger=False, enable_checkpointing=False, enable_progress_bar=False,
+                               num_sanity_val_steps=0, callbacks=[restored])
+            trainer2.fit(self.model(), self.loaders(), self.loaders(), ckpt_path=checkpoint)
+            self.assertEqual(restored.counts['attempts'], 1)
+            self.assertIsNone(restored.trial)
+            self.assertEqual(sum(restored.feedback_counts.values()), 1)
+            self.assertEqual(len(restored.feedback_history), 2)
+            saved = sorted((restored_dir / 'feedback').glob('*.ckpt'))[-1]
+            state = torch.load(saved, weights_only=False)
+            self.assertEqual(state['global_step'], 12)
+            self.assertTrue(state['optimizer_states'][0]['state'])
 
     def test_failure_retains_optimizer_and_records_response(self):
         class BrokenClient(FakeClient):

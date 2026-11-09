@@ -13,3 +13,8 @@ Return exactly one JSON object, no markdown or reasoning tags, in one of these f
 {"action":"set_weight_decay","group":"decoder","value":0.01,"reason":"short explanation"}
 {"action":"set_clip_norm","value":1.0,"reason":"short explanation"}
 Use only group names present in the observations. Never report unobserved improvement.
+
+When feedback_history is provided, use its measured outcomes. A rollback means
+that the modified hyperparameter was restored, not that weights were rewound.
+Avoid repeating unsuccessful proposals without new evidence. A kept action is
+an observational result, not proof that the action caused improvement.

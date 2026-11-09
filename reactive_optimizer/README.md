@@ -6,9 +6,9 @@
 
 ## 行为
 
-AdamW 按 `cell_encoder`、`graph_encoder`、`decoder` 和必要的 `other` 参数分组。保留原配置的学习率、权重衰减及调度器；如原配置启用调度器，它在后续调度步仍会更新学习率，可能覆盖 Agent 的修改。默认 GAT 配置没有调度器。
+AdamW 按 `cell_encoder`、`graph_encoder`、`decoder` 和必要的 `other` 参数分组。保留原配置的初始学习率和权重衰减。默认 GAT 配置没有调度器。自动反馈开启时禁止同时使用学习率调度器，避免恢复旧学习率时覆盖调度器更新；`--baseline` 或 `feedback_enabled: false` 仍支持原调度器。
 
-每 `interval_steps` 个 optimizer step（不是微批次），收集各组梯度范数、参数范数、当前批次训练损失、最近验证 MSE 及其 step、近期决策。LLM 可以：
+每 `interval_steps` 个 optimizer step（不是微批次）检查一次是否允许调用；自动反馈模式还需要近期有效验证基准、没有待评估动作且冷却期已结束。允许调用时收集各组梯度范数、参数范数、当前批次训练损失、最近验证 MSE 及其 step、近期决策。LLM 可以：
 
 - `hold`：保持不变；
 - `scale_lr`：单组学习率乘以限定倍数，结果也必须在绝对边界内；
@@ -66,7 +66,7 @@ python -m reactive_optimizer.train --config config-gat \
 
 如缺少原数据，可加 `--download-data` 调用仓库原 Zenodo 下载器。它可能下载大量文件，应先确认网络和磁盘容量。默认不自动下载。
 
-为了确认真实 LLM 接口工作，可复制 agent YAML，将 `interval_steps` 暂设为 2，然后运行 `trainer.max_steps=4`。检查 `summary.json` 的 attempts/accepted/failed 和实际 `response.json`；短跑只验证接线，不能判断有效性。正式对照恢复较长间隔，并固定相同训练预算和种子。
+为了只确认真实 LLM 接口工作，可复制 agent YAML，将 `interval_steps` 暂设为 2、`feedback_enabled` 暂设为 false，然后运行 `trainer.max_steps=4`。自动反馈需要足够长的训练和真实验证循环，不能用这段短跑验证。检查 `summary.json` 的 attempts/accepted/failed 和实际 `response.json`；短跑只验证接线，不能判断有效性。正式对照恢复较长间隔，并固定相同训练预算和种子。
 
 ## 审计和恢复
 
@@ -78,9 +78,10 @@ python -m reactive_optimizer.train --config config-gat \
 - `response.json`：完整模型响应，保留服务返回的模型名、usage 等信息；
 - `decision.json`：接受/拒绝状态、动作、调用耗时、修改前后的超参数；
 - `before.ckpt`、`after.ckpt`：动作前后完整模型、AdamW moments、scheduler、Lightning loops、控制器历史、Python/NumPy/Torch/CUDA RNG；
-- `checkpoints/last.ckpt`、最佳验证 checkpoint、`final.ckpt`、`summary.json`。
+- `checkpoints/last.ckpt`、最佳验证 checkpoint、`final.ckpt`、`summary.json`；
+- `feedback/*.json` 和对应 `.ckpt`：每次有效反馈的比较值、结论、撤销范围和处理后的训练状态。
 
-完整快照会占磁盘；每次决策有两份，正式实验需估算空间。`summary.json` 的计数包含恢复前的历史；若 accepted=0，不能将该运行当作有效 LLM 干预实验。
+完整快照会占磁盘；每次决策有两份，每次有效反馈也保存一份，正式实验需估算空间。`summary.json` 的计数包含恢复前的历史；若 accepted=0，不能将该运行当作有效 LLM 干预实验。
 
 ```bash
 python -m reactive_optimizer.train --config config-gat \
@@ -99,6 +100,39 @@ MPLCONFIGDIR="$PWD/.cache/matplotlib" XDG_CACHE_HOME="$PWD/.cache" \
 ```
 
 测试用合成小图/表达样本运行真实 TxPert GAT、原损失与 Lightning optimizer/checkpoint 循环；LLM 使用明确标注的确定性传输 fixture。覆盖动作边界、失败保持配置、参数分组、原 scheduler、训练参数更新和 checkpoint 恢复。不下载真实生物数据，不把 fixture 视为 Qwen3-32B 的效果验证。
+
+## 自动反馈与撤销（默认开启）
+
+流程：近期验证基准 → 一个 LLM 动作 → 观察新验证结果 → 保留或撤销 → 冷却期 → 下一动作。
+反馈判断由确定性程序完成，LLM 会在下次请求中收到最近的 `feedback_history`。
+
+默认设置：
+
+```yaml
+feedback_enabled: true
+feedback_min_steps: 500                 # 动作后至少训练这么多步，再作常规评估
+feedback_baseline_max_age_steps: 5000   # 过旧的基准不能启动新动作
+feedback_improvement: 0.01              # 验证 MSE 比基准降低至少 1%
+feedback_regression: 0.05               # 验证 MSE 比基准增加至少 5%
+feedback_patience: 2                    # 连续两次满足条件
+feedback_max_evaluations: 4             # 最多观察四次符合条件的验证
+feedback_cooldown_steps: 500            # 结束一次试验后暂停新干预
+```
+
+参考值为动作前最近一次正常验证的 MSE，比较采用 `(当前MSE - 基准MSE) / max(abs(基准MSE), 1e-12)`。这些阈值是可配置的初始策略，不是经过生物数据验证的最佳值。
+
+- 连续两次改善至少 1%：`kept`，保留设置。
+- 连续两次退化至少 5%：`rollback_regression`，撤销修改。
+- 四次评估仍无连续改善或退化结论：`rollback_inconclusive`，保守撤销。
+- 动作之后出现非有限或负 MSE：`rollback_nonfinite`，不等待最小观察步数，立即撤销；同一步的验证不计入。
+- sanity check、同一步重复验证以及等待步数不足的普通验证不计入反馈次数。没有验证指标时不会调用 Agent；动作待评估时也不叠加新动作。
+- 训练结束仍没有充分反馈时，`summary.json.pending_trial` 明确保留为未决，不标为改善，也不会擅自宣称试验通过。
+
+**撤销仅恢复该动作修改的学习率、权重衰减或裁剪阈值。模型权重、AdamW 动量和训练步数不会回退。** 因此无法消除此前不良更新，也不能修复已经 NaN 的权重；完整回退需停止后从动作前的 `before.ckpt` 恢复。自动在 Lightning 训练循环内倒退样本游标/全模型状态不属于当前实现。
+
+观察记录、连续计数、基准、待评估动作和冷却期会进入 checkpoint，恢复时继续同一试验；恢复输出写入新 run 目录。旧版本（没有反馈状态字段）的 checkpoint 不支持直接续训新版控制器，必须开启新实验。关闭反馈可运行无自动撤销的对照，但仍需新版 checkpoint。
+
+反馈只观察验证集，不使用测试集。验证 MSE 随训练下降本身不能证明是动作造成的；数据噪声或自然收敛也会影响判断。正式判断价值仍需固定预算、多种子和 baseline 对照。这一反馈机制不自动开启代码修改能力。
 
 ## 第二阶段：有实验证据后才开放代码修改
 

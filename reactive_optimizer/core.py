@@ -38,6 +38,19 @@ def validate_config(cfg):
     for key in ('interval_steps', 'history_size', 'max_tokens'):
         if type(cfg[key]) is not int or cfg[key] < 1:
             raise ValueError(f'{key} must be a positive integer')
+    if type(cfg['feedback_enabled']) is not bool:
+        raise ValueError('feedback_enabled must be boolean')
+    for key in ('feedback_min_steps', 'feedback_baseline_max_age_steps',
+                'feedback_patience', 'feedback_max_evaluations'):
+        if type(cfg[key]) is not int or cfg[key] < 1:
+            raise ValueError(f'{key} must be a positive integer')
+    if type(cfg['feedback_cooldown_steps']) is not int or cfg['feedback_cooldown_steps'] < 0:
+        raise ValueError('feedback_cooldown_steps must be nonnegative')
+    if cfg['feedback_patience'] > cfg['feedback_max_evaluations']:
+        raise ValueError('feedback_patience cannot exceed feedback_max_evaluations')
+    for key in ('feedback_improvement', 'feedback_regression'):
+        if not 0 < finite_number(cfg[key]) < 1:
+            raise ValueError(f'{key} must be between 0 and 1')
     for low, high in [('lr_min', 'lr_max'), ('lr_factor_min', 'lr_factor_max'), ('clip_min', 'clip_max')]:
         if not 0 < finite_number(cfg[low]) <= finite_number(cfg[high]):
             raise ValueError(f'Invalid bounds: {low}, {high}')

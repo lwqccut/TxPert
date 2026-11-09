@@ -21,3 +21,12 @@ weight_decay_max: 0.1
 clip_norm: 1.0
 clip_min: 0.1
 clip_max: 10.0
+# Deterministic validation feedback; no further LLM action while a trial is pending.
+feedback_enabled: true
+feedback_min_steps: 500
+feedback_baseline_max_age_steps: 5000
+feedback_improvement: 0.01
+feedback_regression: 0.05
+feedback_patience: 2
+feedback_max_evaluations: 4
+feedback_cooldown_steps: 500
