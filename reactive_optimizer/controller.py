@@ -12,6 +12,7 @@ import torch
 from lightning.pytorch import Callback
 
 from .core import ChatClient, validate_action, write_json
+from .evidence import Evidence, finite
 
 
 def optimizer_settings(optimizer):
@@ -28,7 +29,8 @@ class ReactiveController(Callback):
         self.client = client or ChatClient(cfg, prompt)
         self.clip_norm = cfg['clip_norm']
         self.last_step = 0
-        self.counts = {'attempts': 0, 'accepted': 0, 'changed': 0, 'failed': 0}
+        self.counts = {'attempts': 0, 'accepted': 0, 'changed': 0, 'held': 0, 'no_op': 0, 'failed': 0}
+        self.evidence = Evidence(cfg)
         self.history = []
         self.grad_stats = {}
         self.val = None
@@ -39,16 +41,17 @@ class ReactiveController(Callback):
         self.feedback_counts = {'kept': 0, 'rolled_back': 0}
 
     def state_dict(self):
-        return {'feedback_version': 1, 'trial': self.trial,
+        return {'feedback_version': 2, 'evidence': self.evidence.state(), 'trial': self.trial,
                 'feedback_history': self.feedback_history, 'cooldown_until': self.cooldown_until,
                 'feedback_counts': self.feedback_counts, 'identity': self.identity, 'clip_norm': self.clip_norm, 'last_step': self.last_step,
                 'history': self.history, 'val': self.val, 'counts': self.counts}
 
     def load_state_dict(self, state):
-        if state.get('feedback_version') != 1:
-            raise ValueError('Checkpoint predates feedback support; start a new run')
+        if state.get('feedback_version') != 2:
+            raise ValueError('Checkpoint predates evidence/Pearson feedback; start a new experiment')
         if state['identity'] != self.identity:
             raise ValueError('Resume requires the same controller config, model identity, prompt and baseline mode')
+        self.evidence.restore(state['evidence'])
         for key in ('clip_norm', 'last_step', 'history', 'val', 'counts', 'trial',
                     'feedback_history', 'cooldown_until', 'feedback_counts'):
             setattr(self, key, state[key])
@@ -100,23 +103,47 @@ class ReactiveController(Callback):
             return
         step, mse = int(trainer.global_step), float(value)
         finite = math.isfinite(mse) and mse >= 0
-        self.val = {'mse': mse, 'step': step} if finite else None
+        pearson = trainer.callback_metrics.get('reactive_val_pearson_delta')
+        pearson = float(pearson) if pearson is not None else None
+        pearson_valid = pearson is not None and math.isfinite(pearson) and -1 <= pearson <= 1
+        needs_pearson = self.cfg['feedback_metric'] == 'pearson_delta'
+        valid = finite and (pearson_valid or not needs_pearson)
+        measurement = {'mse': mse if finite else None, 'step': step,
+                       'pearson_delta': pearson if pearson_valid else None}
+        if not self.evidence.validate(measurement):
+            return
+        self.val = measurement if valid else None
+        validation_dir = self.directory / 'validation'
+        validation_dir.mkdir(exist_ok=True)
+        write_json(validation_dir / f'step-{step:09d}.json', {
+            **measurement, 'valid_for_decision': valid, 'validation_id': self.evidence.validation_id,
+            'hold_streak': self.evidence.hold_streak,
+            'next_routine_validation_id': self.evidence.next_validation_id,
+            'evidence': self.evidence.report(),
+        })
         trial = self.trial
         # Same-step validation has seen no training using the proposed settings.
         if trial is None or step <= trial['last_evaluation_step']:
             return
-        if finite and step - trial['step'] < self.cfg['feedback_min_steps']:
+        if valid and step - trial['step'] < self.cfg['feedback_min_steps']:
             return
         trial['last_evaluation_step'] = step
         trial['evaluations'] += 1
         relative_change = ((mse - trial['baseline']['mse']) /
                            max(abs(trial['baseline']['mse']), 1e-12)) if finite else None
         status = 'pending'
-        if not finite:
+        pearson_gain = (pearson-trial['baseline']['pearson_delta']) if needs_pearson and valid else None
+        if not valid:
             status = 'rollback_nonfinite'
         else:
-            trial['good'] = trial['good'] + 1 if relative_change <= -self.cfg['feedback_improvement'] else 0
-            trial['bad'] = trial['bad'] + 1 if relative_change >= self.cfg['feedback_regression'] else 0
+            bad = relative_change >= self.cfg['feedback_regression']
+            if needs_pearson:
+                bad = bad or pearson_gain <= -self.cfg['feedback_pearson_regression']
+                good = pearson_gain >= self.cfg['feedback_pearson_improvement'] and not bad
+            else:
+                good = relative_change <= -self.cfg['feedback_improvement']
+            trial['good'] = trial['good'] + 1 if good else 0
+            trial['bad'] = trial['bad'] + 1 if bad else 0
             if trial['bad'] >= self.cfg['feedback_patience']:
                 status = 'rollback_regression'
             elif trial['good'] >= self.cfg['feedback_patience']:
@@ -126,6 +153,8 @@ class ReactiveController(Callback):
         record = {'trial_id': trial['id'], 'action': trial['action'],
                   'action_step': trial['step'], 'evaluation_step': step,
                   'baseline': trial['baseline'], 'mse': mse if finite else None,
+                  'pearson_delta': pearson if pearson_valid else None, 'pearson_gain': pearson_gain,
+                  'feedback_metric': self.cfg['feedback_metric'],
                   'relative_change': relative_change, 'status': status,
                   'evaluations': trial['evaluations'], 'good': trial['good'], 'bad': trial['bad'],
                   'rollback_scope': 'Changed hyperparameter only; weights and Adam moments are not rewound'}
@@ -155,17 +184,35 @@ class ReactiveController(Callback):
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         step = int(trainer.global_step)
-        if step <= self.last_step or step % self.cfg['interval_steps']:
+        loss = outputs.get('loss') if isinstance(outputs, dict) else outputs
+        loss = float(loss.detach()) if torch.is_tensor(loss) else None
+        # One sample per optimizer update, including with gradient accumulation.
+        if step <= 0 or step <= self.evidence.last_observed_step:
             return
-        self.last_step = step
+        self.evidence.observe(step, loss, self.grad_stats)
+        if step <= self.last_step:
+            return
+        if self.cfg['decision_trigger'] == 'interval':
+            if step % self.cfg['interval_steps']:
+                return
+            trigger = {'kind': 'fixed_interval_ablation'}
+        else:
+            if step - self.last_step < self.cfg['interval_steps']:
+                return
+            trigger = self.evidence.trigger()
+            if trigger is None:
+                self.evidence.skip('no_new_evidence_or_hold_backoff')
+                return
         optimizer = trainer.optimizers[0]
-        if self.enabled and self.cfg['feedback_enabled']:
+        if self.enabled and (self.cfg['feedback_enabled'] or self.cfg['decision_trigger'] == 'evidence'):
             # No stacked interventions, no proposals without a recent finite reference.
             if (self.trial is not None or step < self.cooldown_until or self.val is None
                     or step - self.val['step'] > self.cfg['feedback_baseline_max_age_steps']):
+                self.evidence.skip('pending_trial_cooldown_or_missing_fresh_baseline')
                 return
-        loss = outputs.get('loss') if isinstance(outputs, dict) else outputs
-        loss = float(loss.detach()) if torch.is_tensor(loss) else None
+        self.last_step = step
+        self.evidence.consume()
+        budget = getattr(trainer, 'estimated_stepping_batches', None)
         observation = {
             'step': step, 'epoch': int(trainer.current_epoch),
             'train_loss': loss if loss is not None and math.isfinite(loss) else None,
@@ -175,6 +222,13 @@ class ReactiveController(Callback):
                                                'weight_decay_max', 'clip_min', 'clip_max')},
             'history': list(self.history),
             'feedback_history': list(self.feedback_history),
+            'trigger': trigger, 'evidence': self.evidence.report(),
+            'objective': {'primary': self.cfg['feedback_metric'], 'mse_regression_guard': self.cfg['feedback_regression'],
+                          'pearson_gain_required': self.cfg['feedback_pearson_improvement'],
+                          'min_trial_steps': self.cfg['feedback_min_steps'],
+                          'consecutive_validations_required': self.cfg['feedback_patience']},
+            'training_budget': {'total_steps': int(budget) if finite(budget) else None,
+                                'remaining_steps': max(0, int(budget)-step) if finite(budget) else None},
         }
         # mkdtemp permits branching/resuming without overwriting any old decisions.
         import tempfile
@@ -183,7 +237,7 @@ class ReactiveController(Callback):
         write_json(event / 'request.json', payload)
         trainer.save_checkpoint(event / 'before.ckpt')
         record = {'step': step, 'enabled': self.enabled, 'before': optimizer_settings(optimizer),
-                  'clip_before': self.clip_norm, 'status': 'baseline'}
+                  'clip_before': self.clip_norm, 'status': 'baseline', 'changed': False, 'trigger': trigger}
         started = time.monotonic()
         if self.enabled:
             self.counts['attempts'] += 1
@@ -206,22 +260,30 @@ class ReactiveController(Callback):
                         'field': field, 'old_value': old_value, 'new_value': value,
                         'evaluations': 0, 'good': 0, 'bad': 0, 'last_evaluation_step': step,
                     }
-                record.update(status='accepted', action=action, pending_feedback=self.trial is not None)
+                effect = 'applied' if changed else ('hold' if action['action'] == 'hold' else 'no_op')
+                record.update(status='accepted', action=action, changed=changed, decision_effect=effect,
+                              pending_feedback=self.trial is not None)
                 self.counts['accepted'] += 1
                 self.counts['changed'] += int(changed)
+                self.counts['held'] += int(effect == 'hold')
+                self.counts['no_op'] += int(effect == 'no_op')
+                self.evidence.outcome(unchanged=not changed)
             except Exception as error:
                 # No exception text: HTTP errors may contain credential-bearing URLs.
                 record.update(status='rejected_or_unavailable', error_type=type(error).__name__)
                 self.counts['failed'] += 1
         record.update(elapsed_seconds=time.monotonic() - started,
-                      after=optimizer_settings(optimizer), clip_after=self.clip_norm)
+                      after=optimizer_settings(optimizer), clip_after=self.clip_norm,
+                      hold_streak=self.evidence.hold_streak,
+                      next_routine_validation_id=self.evidence.next_validation_id)
         write_json(event / 'decision.json', record)
         self.history.append({'step': step, 'train_loss': observation['train_loss'],
                              'validation': self.val, 'status': record['status'],
                              'action': record.get('action')})
         self.history = self.history[-self.cfg['history_size']:]
         trainer.save_checkpoint(event / 'after.ckpt')
-        print(f"Reactive step {step}: {record['status']} ({event.name})", flush=True)
+        print(f"Reactive step {step}: {record['status']}, effect={record.get('decision_effect', 'none')}, "
+              f"changed={record['changed']}, hold_streak={self.evidence.hold_streak} ({event.name})", flush=True)
 
     def on_train_end(self, trainer, pl_module):
         write_json(self.directory / 'summary.json', {
@@ -230,5 +292,9 @@ class ReactiveController(Callback):
             'last_validation': self.val,
             'feedback_counts': self.feedback_counts,
             'pending_trial': self.trial,
+            'evidence_state': self.evidence.state(),
+            'intervention_observed': self.counts['changed'] > 0,
+            'warning': ('LLM was called but never changed training settings; this run does not demonstrate an intervention.'
+                        if self.counts['attempts'] and not self.counts['changed'] else None),
             'note': 'Accepted actions do not establish improved biological prediction.',
         })

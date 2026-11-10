@@ -83,6 +83,10 @@ class OpalAudit(ReactiveController):
         if value is not None and math.isfinite(float(value)):
             self.val = {'mse': float(value), 'step': int(trainer.global_step)}
             trainer.optimizers[0].log(validation_mse=value, show_agent=True)
+            pearson = trainer.callback_metrics.get('reactive_val_pearson_delta')
+            if pearson is not None and math.isfinite(float(pearson)):
+                self.val['pearson_delta'] = float(pearson)
+                trainer.optimizers[0].log(validation_pearson_delta=pearson, show_agent=True)
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         step = int(trainer.global_step)

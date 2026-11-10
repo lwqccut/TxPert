@@ -86,9 +86,15 @@ def main():
                    else Path(__file__).with_name('prompt.txt'))
     prompt = prompt_path.read_text()
     (output / 'prompt.txt').write_text(prompt)
+    checkpoint_metric = ('reactive_val_pearson_delta'
+                         if args.engine == 'bounded' and agent['feedback_metric'] == 'pearson_delta'
+                         else 'reactive_val_mse')
+    checkpoint_mode = 'max' if checkpoint_metric.endswith('pearson_delta') else 'min'
     manifest = {
         'txpert': config, 'agent': agent, 'baseline': args.baseline,
         'engine': args.engine, 'opal': opal_options,
+        'checkpoint_selection': {'metric': checkpoint_metric, 'mode': checkpoint_mode},
+        'validation_pearson_definition': 'Mean correlation over condition/dose/cell groups; subtract validation control means, batch-matched when configured; undefined constant groups score zero.',
         'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
         'source_status': subprocess.check_output(['git', 'status', '--porcelain'], text=True),
         'python': sys.version, 'torch': torch.__version__,
@@ -129,7 +135,7 @@ def main():
     trainer_args['gradient_clip_algorithm'] = 'norm'
     trainer_args['callbacks'] = [controller, ModelCheckpoint(
         dirpath=output / 'checkpoints', filename='{epoch:03d}-{step}',
-        save_last=True, save_top_k=1, monitor='reactive_val_mse', mode='min')]
+        save_last=True, save_top_k=1, monitor=checkpoint_metric, mode=checkpoint_mode)]
     trainer = Trainer(**trainer_args)
     trainer.fit(model, datamodule=dm, ckpt_path=args.resume)
     trainer.save_checkpoint(output / 'final.ckpt')

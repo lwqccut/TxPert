@@ -11,6 +11,18 @@ seed: 1
 max_tokens: 1024
 timeout_seconds: 90
 interval_steps: 500
+# Evidence mode: minimum optimizer steps between decisions, not unconditional calls.
+# interval is available only as a fixed-frequency ablation/transport smoke test.
+decision_trigger: evidence
+trend_window: 50
+trend_sample_every: 10
+event_loss_ratio: 1.25
+event_grad_ratio: 2.0
+event_fraction: 0.8
+# After two consecutive unchanged decisions, wait 2, then 4, then 8 new validations.
+# Fresh regression or a sustained training event can bypass this backoff.
+hold_backoff_after: 2
+hold_backoff_max_validations: 8
 history_size: 8
 lr_factor_min: 0.5
 lr_factor_max: 1.2
@@ -23,6 +35,10 @@ clip_min: 0.1
 clip_max: 10.0
 # Deterministic validation feedback; no further LLM action while a trial is pending.
 feedback_enabled: true
+feedback_metric: pearson_delta
+# Absolute Pearson delta gain/drop; MSE regression remains an additional guard.
+feedback_pearson_improvement: 0.005
+feedback_pearson_regression: 0.01
 feedback_min_steps: 500
 feedback_baseline_max_age_steps: 5000
 feedback_improvement: 0.01

@@ -49,6 +49,8 @@ python -m reactive_optimizer.train --engine opal \
 
 当前 Lightning 桥只支持 **单训练设备、FP32、无外部学习率调度器**；本地 LLM 服务可以另占多张 GPU。原 GAT 配置的调度器为空，可直接使用。其他结构虽然可选择配置，但集成测试仅覆盖 GAT。训练裁剪交给 OPAL 起始 updater，Lightning 的裁剪设为 0，避免裁剪两次。第一阶段的固定验证阈值反馈器不在此模式运行，避免它与生成的更新算法互相覆盖。
 
+共享验证桥现在同时计算验证 MSE 和 Pearson Δ，并通过官方指标接口把两者交给 OPAL；OPAL 的默认 goal 和最佳 checkpoint 选择仍为 MSE。上层新增的 evidence 调用门控、hold 退避和确定性 Pearson 反馈**只用于 bounded 模式**；OPAL 保留自己的调度与试运行机制。新版共享配置/回调状态也会使旧 OPAL checkpoint 的身份或版本检查失败，应开启新实验，不做静默迁移。
+
 启动脚本会先估计完整 optimizer-step 预算。`interval_steps` 指定计划决策间隔，`every` 指定官方检查间隔；前者必须是后者的整数倍。`max_decisions` 限制包括诊断唤醒在内的总决策次数，因此不能简单把它当作每 N 步必有一次调用。最后一步不安排新的计划决策。
 
 若改为 5000 步：复制本目录 YAML，设 `interval_steps: 5000`，通过 `--opal-config` 传入。如果要异步运行，将同一文件中的 `blocking` 改为 false。计划步数、实际调用与应用步数均以运行日志为准。

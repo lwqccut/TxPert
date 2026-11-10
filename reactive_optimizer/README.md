@@ -1,4 +1,6 @@
-# TxPert + Qwen3-32B 受约束优化控制器
+# TxPert + 本地 LLM 优化实验
+
+本目录提供两种模式：默认 `--engine bounded` 是下文的受约束超参数 Agent；`--engine opal` 是 [官方 OPAL 多轮代码模式](opal_mode/README.md)，支持修改诊断和优化算法。默认 TxPert 模型仍为原 `config-gat` 的 GATv2。
 
 本目录实现 Reactive Optimizers / OPAL 思路的第一阶段：Qwen3-32B 观察训练统计，输出受约束 JSON 动作。复用 `gspp.models.txpert.TxPert`、`PertPredictor.training_step`、原损失函数、数据模块、图和 `configs/config-*.yaml`。未添加 foundation model，也未替换为仓库中的 `forward_model`。
 
@@ -8,7 +10,13 @@
 
 AdamW 按 `cell_encoder`、`graph_encoder`、`decoder` 和必要的 `other` 参数分组。保留原配置的初始学习率和权重衰减。默认 GAT 配置没有调度器。自动反馈开启时禁止同时使用学习率调度器，避免恢复旧学习率时覆盖调度器更新；`--baseline` 或 `feedback_enabled: false` 仍支持原调度器。
 
-每 `interval_steps` 个 optimizer step（不是微批次）检查一次是否允许调用；自动反馈模式还需要近期有效验证基准、没有待评估动作且冷却期已结束。允许调用时收集各组梯度范数、参数范数、当前批次训练损失、最近验证 MSE 及其 step、近期决策。LLM 可以：
+默认 `decision_trigger: evidence`，`interval_steps` 是两次决策的**最小 optimizer-step 间隔**，不再是固定调用周期。正常情况下，只有新的验证结果才会触发一次调用，且需要有效、近期的验证基准，没有待评估动作并结束冷却。同一份验证结果不会反复触发常规调用。触发发生在满足间隔要求的后续训练 batch 结束时；最后一次验证之后如果训练已结束，不再发起新决策。
+
+此外，连续训练窗口的损失/分组梯度异常可以触发事件调用。默认每 10 个 optimizer step 采样，比较前后各 50 个样本：最近窗口至少 80% 样本的 loss 超过前窗口均值的 1.25 倍，或某组梯度范数超过 2 倍，才构成事件。单次波动不触发，同一持续事件只唤醒一次。事件允许复用尚未过期的验证基准，但仍受最小间隔、待评估动作和冷却限制；不是逐步即时故障处理器。
+
+连续 `hold` 或无实际变化的动作达到两次后，下次常规调用等待 2、4、8 次新验证，最多间隔 8 次。新的验证显著退化或持续训练异常可提前唤醒；发生实际修改后重置 hold 计数。若验证每 epoch 一次，这些间隔按验证次数计算，不是固定步数。阈值是可配置的初始策略，未经过真实生物数据调优。
+
+每次请求包含损失/分组梯度的前后窗口均值、标准差、每步斜率、梯度/参数范数比，以及去重的验证 MSE 和 Pearson Δ 历史、触发原因、剩余训练步数及试验反馈。范数比是尺度代理，不是 AdamW 的实际更新量。提示词要求提出有依据、可证伪的小幅试验，不能仅因 MSE 仍下降就一直 hold，也不强迫模型修改。LLM 可以：
 
 - `hold`：保持不变；
 - `scale_lr`：单组学习率乘以限定倍数，结果也必须在绝对边界内；
@@ -17,7 +25,9 @@ AdamW 按 `cell_encoder`、`graph_encoder`、`decoder` 和必要的 `other` 参�
 
 未知动作、额外字段、越界数值、NaN/Infinity、非法 JSON 和连接失败不会改变优化器。原始响应（若收到）及失败类型保留在日志中。没有 `exec`、动态代码导入或源码重写。
 
-为隔离测试集，新入口覆盖原来在验证结束时读取测试集的行为，只用验证表达 MSE。训练目标保持不变。该 MSE 用于控制器和最佳 checkpoint 选择，不代表差异表达或跨细胞泛化表现。未执行最终测试集评估；应在方法选择完成后另行做固定测试评测。
+为隔离测试集，新入口覆盖原来在验证结束时读取测试集的行为，只使用验证预测、验证真实表达以及 `control_data_val` 的对照表达。训练损失保持不变。新增 `reactive_val_pearson_delta`：按扰动条件/剂量/细胞类型聚合，减去匹配实验批次的对照均值（`match_cntr_for_eval: false` 时使用该细胞类型总体对照均值），计算 Pearson，再对各条件组等权平均。这与原评估的 Pearson Δ 分组定义一致；不是逐细胞相关性的平均，也不是绝对表达 Pearson。常量向量相关性按原实现记 0，并记录组数/未定义组数；非有限结果不能用于新干预。原始验证样本不发给 LLM，只发送统计。
+
+默认 bounded 模式以验证 Pearson Δ 最大值选择最佳 checkpoint，反馈同时约束 MSE 退化。`feedback_metric: mse` 可切回 MSE 反馈和 checkpoint 选择，适合预先设计的消融实验。最终测试仍须在方法选择完成后单独评估。验证统计在 CPU 端流式累积，内存随条件组数×基因数增长，会增加验证开销；不保留全部单细胞预测。
 
 运行时适配还将原 TxPert 构造出的浮点图边索引转换为整数（PyG 要求），不改图连接或网络结构。默认开启 norm=1 的梯度裁剪；如原 Trainer 配置已指定 norm 裁剪，则优先采用原值。这些适配同样用于 `--baseline` 对照。
 
@@ -52,7 +62,7 @@ source .venv/bin/activate
 python -m reactive_optimizer.train --config config-gat \
   --baseline --output reactive_optimizer/runs/config-check --print-config
 
-# 对照：相同参数分组、裁剪、验证、检查点开销，不调用 LLM。
+# 对照：相同模型、参数分组、裁剪和验证指标，不调用 LLM。
 python -m reactive_optimizer.train --config config-gat \
   --baseline --output reactive_optimizer/runs/baseline-seed1 seed=1
 
@@ -66,7 +76,7 @@ python -m reactive_optimizer.train --config config-gat \
 
 如缺少原数据，可加 `--download-data` 调用仓库原 Zenodo 下载器。它可能下载大量文件，应先确认网络和磁盘容量。默认不自动下载。
 
-为了只确认真实 LLM 接口工作，可复制 agent YAML，将 `interval_steps` 暂设为 2、`feedback_enabled` 暂设为 false，然后运行 `trainer.max_steps=4`。自动反馈需要足够长的训练和真实验证循环，不能用这段短跑验证。检查 `summary.json` 的 attempts/accepted/failed 和实际 `response.json`；短跑只验证接线，不能判断有效性。正式对照恢复较长间隔，并固定相同训练预算和种子。
+为了只确认真实 LLM 接口工作，可复制当前 agent YAML，将 `decision_trigger` 暂设为 `interval`、`interval_steps` 设为 2、`feedback_enabled` 设为 false，然后运行 `trainer.max_steps=4`。固定间隔模式仅用于接线测试或消融，不应用来判断新版证据触发效果。自动反馈需要足够长的训练和真实验证循环，不能用这段短跑验证。正式实验恢复 `evidence` 模式，固定相同模型、数据划分、训练预算和种子。验证调用次数不同会改变 checkpoint I/O 开销，因此 baseline 与 Agent 的墙钟时间应实测，不能假设完全相同。
 
 ## 审计和恢复
 
@@ -76,12 +86,13 @@ python -m reactive_optimizer.train --config config-gat \
 - `prompt.txt`：本次使用的系统提示词；
 - `step-.../request.json`：完整消息、采样参数和观测；
 - `response.json`：完整模型响应，保留服务返回的模型名、usage 等信息；
-- `decision.json`：接受/拒绝状态、动作、调用耗时、修改前后的超参数；
+- `decision.json`：接受/拒绝状态、`decision_effect`（`hold` / `no_op` / `applied`）、`changed`、触发原因、调用耗时、修改前后的超参数、连续 hold 次数及下次常规验证序号；
+- `validation/step-*.json`：每次去重验证的 MSE、Pearson Δ 和训练趋势，包括跳过 LLM 调用的验证；
 - `before.ckpt`、`after.ckpt`：动作前后完整模型、AdamW moments、scheduler、Lightning loops、控制器历史、Python/NumPy/Torch/CUDA RNG；
 - `checkpoints/last.ckpt`、最佳验证 checkpoint、`final.ckpt`、`summary.json`；
 - `feedback/*.json` 和对应 `.ckpt`：每次有效反馈的比较值、结论、撤销范围和处理后的训练状态。
 
-完整快照会占磁盘；每次决策有两份，每次有效反馈也保存一份，正式实验需估算空间。`summary.json` 的计数包含恢复前的历史；若 accepted=0，不能将该运行当作有效 LLM 干预实验。
+完整快照会占磁盘；每次决策有两份，每次有效反馈也保存一份，正式实验需估算空间。`summary.json` 的计数包含恢复前的历史：`accepted` 只表示合法回答，`held` 是保持次数，`no_op` 是形式上提出动作但数值未改变，**`changed` 才是实际修改次数**。若 LLM 被调用而 `changed=0`，摘要会明确告警，并设 `intervention_observed=false`；这不证明发生了优化干预。发生修改也不代表有效。摘要和 checkpoint 还保存趋势窗口、验证序号、已消费事件、退避及跳过检查次数。
 
 ```bash
 python -m reactive_optimizer.train --config config-gat \
@@ -92,6 +103,8 @@ python -m reactive_optimizer.train --config config-gat \
 
 只加载可信 checkpoint。恢复时必须使用相同模型结构、数据划分、agent 配置、提示词、权重 revision 和 baseline 模式；控制器会检查其配置/提示词身份。优先在 epoch 边界恢复：原数据加载器没有可恢复游标，mid-epoch 恢复不保证相同样本顺序。保存 RNG/温度为 0 也不保证 GPU 运算或服务输出逐位一致。审计文件用于解释和复现实验条件，不宣称逐位确定性。
 
+**本次策略升级必须开启新实验。** 新版反馈状态版本为 2，提示词、调用策略、目标指标和 checkpoint 选择均发生变化。旧的 agent YAML 请以当前配置为底复制，并填回你实际使用的 endpoint、model、revision、precision、超时等设置；不要悄悄改动旧实验的配置。旧 checkpoint 不支持直接 `--resume` 到新版控制器，正在运行的进程也不会因拉取 main 自动切换策略。基线和 Agent 都应使用同一新版评估方式重新对照。
+
 ## 测试
 
 ```bash
@@ -99,7 +112,7 @@ MPLCONFIGDIR="$PWD/.cache/matplotlib" XDG_CACHE_HOME="$PWD/.cache" \
   python -m unittest discover -s reactive_optimizer/tests -v
 ```
 
-测试用合成小图/表达样本运行真实 TxPert GAT、原损失与 Lightning optimizer/checkpoint 循环；LLM 使用明确标注的确定性传输 fixture。覆盖动作边界、失败保持配置、参数分组、原 scheduler、训练参数更新和 checkpoint 恢复。不下载真实生物数据，不把 fixture 视为 Qwen3-32B 的效果验证。
+测试用合成小图/表达样本运行真实 TxPert GAT、原损失与 Lightning optimizer/checkpoint 循环；LLM 使用明确标注的确定性传输 fixture。覆盖动作边界、Pearson Δ 与原指标计算的数值对照、验证去重、持续异常、单步噪声、连续 hold 退避、指标冲突撤销、控制器状态恢复，以及全 hold 与无 LLM 基线的权重一致性。不下载真实生物数据，不把 fixture 视为 Qwen3-32B/DeepSeek 的效果验证。
 
 ## 自动反馈与撤销（默认开启）
 
@@ -110,27 +123,30 @@ MPLCONFIGDIR="$PWD/.cache/matplotlib" XDG_CACHE_HOME="$PWD/.cache" \
 
 ```yaml
 feedback_enabled: true
+feedback_metric: pearson_delta
+feedback_pearson_improvement: 0.005     # Pearson Δ 绝对增量，不是相对百分比
+feedback_pearson_regression: 0.01       # Pearson Δ 绝对下降阈值
 feedback_min_steps: 500                 # 动作后至少训练这么多步，再作常规评估
 feedback_baseline_max_age_steps: 5000   # 过旧的基准不能启动新动作
-feedback_improvement: 0.01              # 验证 MSE 比基准降低至少 1%
-feedback_regression: 0.05               # 验证 MSE 比基准增加至少 5%
+feedback_improvement: 0.01              # 仅 mse 反馈模式使用：MSE 降低至少 1%
+feedback_regression: 0.05               # 两种模式均限制 MSE 增加至少 5%
 feedback_patience: 2                    # 连续两次满足条件
 feedback_max_evaluations: 4             # 最多观察四次符合条件的验证
 feedback_cooldown_steps: 500            # 结束一次试验后暂停新干预
 ```
 
-参考值为动作前最近一次正常验证的 MSE，比较采用 `(当前MSE - 基准MSE) / max(abs(基准MSE), 1e-12)`。这些阈值是可配置的初始策略，不是经过生物数据验证的最佳值。
+参考值为动作前最近一次正常验证。MSE 使用相对变化 `(当前MSE - 基准MSE) / max(abs(基准MSE), 1e-12)`；Pearson 使用绝对差 `当前Pearson - 基准Pearson`，支持负相关起点。以下是默认 Pearson 模式；阈值是可配置的初始策略，不是经过生物数据验证的最佳值。
 
-- 连续两次改善至少 1%：`kept`，保留设置。
-- 连续两次退化至少 5%：`rollback_regression`，撤销修改。
+- 连续两次 Pearson Δ 提升至少 0.005，且 MSE 未触及退化阈值：`kept`，保留设置。
+- 连续两次满足“Pearson Δ 降低至少 0.01”或“MSE 增加至少 5%”：`rollback_regression`，撤销修改。MSE 下降不能抵消 Pearson 明显退化，Pearson 提升也不能抵消 MSE 明显退化。
 - 四次评估仍无连续改善或退化结论：`rollback_inconclusive`，保守撤销。
-- 动作之后出现非有限或负 MSE：`rollback_nonfinite`，不等待最小观察步数，立即撤销；同一步的验证不计入。
+- 动作之后出现非有限/负 MSE，或必需的 Pearson 缺失、非有限、超出 [-1, 1]：`rollback_nonfinite`，不等待最小观察步数，立即撤销；同一步的验证不计入。
 - sanity check、同一步重复验证以及等待步数不足的普通验证不计入反馈次数。没有验证指标时不会调用 Agent；动作待评估时也不叠加新动作。
 - 训练结束仍没有充分反馈时，`summary.json.pending_trial` 明确保留为未决，不标为改善，也不会擅自宣称试验通过。
 
 **撤销仅恢复该动作修改的学习率、权重衰减或裁剪阈值。模型权重、AdamW 动量和训练步数不会回退。** 因此无法消除此前不良更新，也不能修复已经 NaN 的权重；完整回退需停止后从动作前的 `before.ckpt` 恢复。自动在 Lightning 训练循环内倒退样本游标/全模型状态不属于当前实现。
 
-观察记录、连续计数、基准、待评估动作和冷却期会进入 checkpoint，恢复时继续同一试验；恢复输出写入新 run 目录。旧版本（没有反馈状态字段）的 checkpoint 不支持直接续训新版控制器，必须开启新实验。关闭反馈可运行无自动撤销的对照，但仍需新版 checkpoint。
+观察记录、连续计数、基准、待评估动作和冷却期会进入 checkpoint，恢复时继续同一试验；恢复输出写入新 run 目录。旧版本的 checkpoint 不支持直接续训新版控制器，必须开启新实验。关闭反馈可运行无自动撤销的对照，但 evidence 调用仍要求有效验证，仍需新版 checkpoint。
 
 反馈只观察验证集，不使用测试集。验证 MSE 随训练下降本身不能证明是动作造成的；数据噪声或自然收敛也会影响判断。正式判断价值仍需固定预算、多种子和 baseline 对照。这一反馈机制不自动开启代码修改能力。
 

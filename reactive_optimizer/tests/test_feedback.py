@@ -30,7 +30,8 @@ class FeedbackTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.cfg = {**CONFIG, 'interval_steps': 2, 'feedback_min_steps': 2,
-                    'feedback_baseline_max_age_steps': 10, 'feedback_cooldown_steps': 4}
+                    'feedback_baseline_max_age_steps': 10, 'feedback_cooldown_steps': 4,
+                    'feedback_metric': 'mse', 'decision_trigger': 'interval'}
         self.client = Client(self.cfg, PROMPT)
         self.controller = ReactiveController(self.cfg, self.tmp.name, PROMPT, client=self.client)
         self.parameter = torch.nn.Parameter(torch.ones(2))

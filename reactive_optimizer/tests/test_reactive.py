@@ -16,7 +16,8 @@ from reactive_optimizer.core import group_parameters, validate_action, validate_
 from reactive_optimizer.controller import ReactiveController
 
 BASE = Path(__file__).resolve().parents[1]
-CFG = {**yaml.safe_load((BASE / 'config.yaml').read_text()), 'feedback_enabled': False}
+CFG = {**yaml.safe_load((BASE / 'config.yaml').read_text()), 'feedback_enabled': False,
+       'decision_trigger': 'interval', 'feedback_metric': 'mse'}
 PROMPT = (BASE / 'prompt.txt').read_text()
 
 
@@ -117,7 +118,11 @@ class TxPertIntegrationTests(unittest.TestCase):
                            pert_dose=pd.Series([1]*len(rows)), idx=pd.Series(range(len(rows))),
                            cell_types=pd.Series(['K562']*len(rows)),
                            experimental_batches=pd.Series(['b0']*len(rows)))
-        return DataLoader([torch.randn(8) for _ in range(8)], batch_size=2, collate_fn=collate)
+        class SyntheticExpression(list):
+            pass
+        data = SyntheticExpression([torch.randn(8) for _ in range(8)])
+        data.validation_control_means = {('K562', 'b0'): torch.zeros(8, dtype=torch.float64)}
+        return DataLoader(data, batch_size=2, collate_fn=collate)
 
     def test_grouping_and_original_scheduler(self):
         model = self.model({'type':'cosine','total_epochs':4,'warmup_epochs':1})

@@ -35,6 +35,30 @@ def finite_number(value):
 
 
 def validate_config(cfg):
+    required = ('decision_trigger', 'feedback_metric', 'trend_window', 'trend_sample_every',
+                'hold_backoff_after', 'hold_backoff_max_validations', 'event_loss_ratio',
+                'event_grad_ratio', 'event_fraction', 'feedback_pearson_improvement',
+                'feedback_pearson_regression')
+    missing = [key for key in required if key not in cfg]
+    if missing:
+        raise ValueError(f'Agent config is missing evidence policy settings {missing}; start from the current config.yaml for a new experiment')
+    if cfg['decision_trigger'] not in ('evidence', 'interval'):
+        raise ValueError('decision_trigger must be evidence or interval')
+    if cfg['feedback_metric'] not in ('pearson_delta', 'mse'):
+        raise ValueError('feedback_metric must be pearson_delta or mse')
+    for key in ('trend_window', 'trend_sample_every', 'hold_backoff_after', 'hold_backoff_max_validations'):
+        if type(cfg[key]) is not int or cfg[key] < 1:
+            raise ValueError(f'{key} must be a positive integer')
+    if cfg['trend_window'] < 2:
+        raise ValueError('trend_window must contain at least two samples')
+    for key in ('event_loss_ratio', 'event_grad_ratio'):
+        if finite_number(cfg[key]) <= 1:
+            raise ValueError(f'{key} must exceed 1')
+    if not 0 < finite_number(cfg['event_fraction']) <= 1:
+        raise ValueError('event_fraction must be in (0, 1]')
+    for key in ('feedback_pearson_improvement', 'feedback_pearson_regression'):
+        if not 0 < finite_number(cfg[key]) < 2:
+            raise ValueError(f'{key} must be in (0, 2)')
     for key in ('interval_steps', 'history_size', 'max_tokens'):
         if type(cfg[key]) is not int or cfg[key] < 1:
             raise ValueError(f'{key} must be a positive integer')

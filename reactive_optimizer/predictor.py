@@ -2,11 +2,13 @@
 import torch
 from gspp.predictor import PertPredictor
 from .core import group_parameters
+from .validation import ValidationDelta, control_means
 
 
 class ReactivePredictor(PertPredictor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.validation_control_means = None
         # The original TxPert constructor converts numpy edges with torch.Tensor,
         # yielding float32 indices; PyG requires integers. Normalize only graph
         # index dtype, preserving the graph, model weights and architecture.
@@ -44,13 +46,31 @@ class ReactivePredictor(PertPredictor):
             expand(scheduler)
         return original
 
+    def on_validation_epoch_start(self):
+        if self.validation_control_means is None:
+            dm = self.trainer.datamodule
+            if dm is not None and hasattr(dm, 'control_data_val'):
+                self.validation_control_means = control_means(dm.control_data_val, self.match_cntr_for_eval)
+            else:
+                # Standalone loaders must explicitly provide control means, never inferred
+                # from perturbed targets or encoded/sampled input features.
+                self.validation_control_means = getattr(
+                    self.trainer.val_dataloaders.dataset, 'validation_control_means', None)
+            if self.validation_control_means is None:
+                raise ValueError('Provide validation control expression means for Pearson delta')
+        self.validation_delta = ValidationDelta(self.validation_control_means, self.match_cntr_for_eval)
+
     def validation_step(self, batch, batch_idx):
         prediction, _, _ = self.forward(batch.control, batch.pert_idxs, batch.p)
         target = batch.x[:, :self.adata_output_dim].to(prediction.device)
         self.log('reactive_val_mse', torch.mean((prediction - target) ** 2),
                  on_step=False, on_epoch=True, batch_size=prediction.shape[0])
+        self.validation_delta.update(prediction, target, batch)
 
     def on_validation_epoch_end(self):
         # Parent evaluates test_dataloader during validation. Deliberately omit it:
         # the controller and checkpoint selection must never observe test results.
-        pass
+        score, groups, undefined = self.validation_delta.compute()
+        self.log('reactive_val_pearson_delta', score, on_step=False, on_epoch=True)
+        self.log('reactive_val_pearson_groups', float(groups), on_step=False, on_epoch=True)
+        self.log('reactive_val_pearson_undefined_groups', float(undefined), on_step=False, on_epoch=True)
