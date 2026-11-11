@@ -2,12 +2,12 @@
 
 本模式接入论文作者的 [OPAL](https://github.com/xingjian-bai/opal)，固定提交
 `e999c21ee1a05891ea09d7d29bf2cd6597ca686b`（包版本 0.3.10，MIT）。不复制或修改 OPAL 内部实现。
-这是将论文核心机制迁移到 TxPert 的实现，不是论文结果的严格复现：任务、Agent 模型、工具接口和计算预算不同；尚未做真实 Qwen3/GPU/生物数据效果实验。
+这是将论文核心机制迁移到 TxPert 的实现，不是论文结果的严格复现：任务、Agent 模型、工具接口和计算预算不同。OPAL 能否改善 TxPert 的生物学预测性能必须通过独立、多随机种子的真实数据对照实验确认，代码预检或试运行通过不代表性能提升。
 
 ## 实际功能
 
 - 使用原 TxPert 模型、损失、图和 Hydra 配置，以及第一阶段的整数图索引适配、参数分组、验证集隔离。
-- 官方 `opal.wrap` 包装 AdamW。未修改程序前执行原优化器，`keep` 基线不调用 LLM。
+- 官方 `opal.wrap` 包装 AdamW。Lightning 在每次真实 optimizer update 前通过 `observe(loss)` 将该次更新对应的训练损失交给 OPAL；梯度累积时按 micro-batch 样本数加权汇总。未修改程序前执行原优化器，`keep` 基线不调用 LLM。
 - Qwen 可以多轮读取报告、修改 `analysis.py`、`updater.py` 和 `helper_*.py`，运行检查、读取错误并在同一次决策内修复，不再受学习率等四种动作的菜单限制。
 - `analysis.py` 自行测量参数/梯度/优化器状态、维护诊断 memory，输出报告或 wake 请求。
 - `updater.py` 可以实现不同算法、分组策略、动量处理和设备兼容的精度策略。编程范围遵守 OPAL precision contract，不允许改变模型参数/梯度 dtype 或设备。
@@ -49,7 +49,9 @@ python -m reactive_optimizer.train --engine opal \
 
 当前 Lightning 桥只支持 **单训练设备、FP32、无外部学习率调度器**；本地 LLM 服务可以另占多张 GPU。原 GAT 配置的调度器为空，可直接使用。其他结构虽然可选择配置，但集成测试仅覆盖 GAT。训练裁剪交给 OPAL 起始 updater，Lightning 的裁剪设为 0，避免裁剪两次。第一阶段的固定验证阈值反馈器不在此模式运行，避免它与生成的更新算法互相覆盖。
 
-共享验证桥现在同时计算验证 MSE 和 Pearson Δ，并通过官方指标接口把两者交给 OPAL；OPAL 的默认 goal 和最佳 checkpoint 选择仍为 MSE。上层新增的 evidence 调用门控、hold 退避和确定性 Pearson 反馈**只用于 bounded 模式**；OPAL 保留自己的调度与试运行机制。新版共享配置/回调状态也会使旧 OPAL checkpoint 的身份或版本检查失败，应开启新实验，不做静默迁移。
+共享验证桥同时计算验证 MSE 和 Pearson Δ，并通过 `opt.log(..., show_agent=True)` 将两者交给 OPAL。默认以 Pearson Δ 为主要指标（最大化），MSE 为辅助诊断；`selection_metric` 可设为 `pearson_delta` 或 `mse`，最佳 checkpoint 按该指标选择。每次 optimizer update 的训练 loss 通过 OPAL 官方 Lightning 接口 `observe(loss)` 传递；梯度累积时使用样本数加权的 micro-batch 平均损失。上层新增的 evidence 调用门控、hold 退避和确定性 Pearson 反馈**只用于 bounded 模式**；OPAL 保留自己的调度与程序试运行机制。注意 `trial_steps` 只用于检测候选 updater 的运行故障，不是验证集性能验收或质量回滚。新版训练状态与目标配置会使旧 OPAL checkpoint 的实验身份发生变化，应开启新实验，不做静默迁移。
+
+`share_code: true` 会把只读模型/训练源码提供给 Agent，以便其结合 TxPert 架构分析更新程序。默认 Qwen endpoint 为本机地址；如果改用远程服务，应先确认可以向该服务发送项目源码。若不希望共享源码，将 `share_code` 设为 `false`。
 
 启动脚本会先估计完整 optimizer-step 预算。`interval_steps` 指定计划决策间隔，`every` 指定官方检查间隔；前者必须是后者的整数倍。`max_decisions` 限制包括诊断唤醒在内的总决策次数，因此不能简单把它当作每 N 步必有一次调用。最后一步不安排新的计划决策。
 
@@ -81,7 +83,7 @@ python -m reactive_optimizer.train --engine opal \
 
 上层 `manifest.json` 继续保存解析配置、源文件哈希、包版本、声明的模型版本和提示词。额外保存：
 
-- `opal-settings.json`：上游提交、版本、计划决策步数、参数形状与配置；
+- `opal-settings.json`：上游提交、版本、计划决策步数、参数形状、源码共享设置与 checkpoint 选择指标；
 - `opal/workspace/analysis.py` 和 `updater.py`：官方工作区（以 programs 版本和事件日志确认实际应用）；
 - `opal/programs/vNNN/`：代码版本；
 - `opal/decisions/NNN/turns/TTT/`：每轮 `request.json`、`response.json`、`tool-result.json` 或 `error.json`；
