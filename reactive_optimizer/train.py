@@ -86,9 +86,13 @@ def main():
                    else Path(__file__).with_name('prompt.txt'))
     prompt = prompt_path.read_text()
     (output / 'prompt.txt').write_text(prompt)
-    checkpoint_metric = ('reactive_val_pearson_delta'
-                         if args.engine == 'bounded' and agent['feedback_metric'] == 'pearson_delta'
-                         else 'reactive_val_mse')
+    if args.engine == 'opal':
+        opal_selection = opal_options.get('selection_metric', 'pearson_delta')
+        checkpoint_metric = ('reactive_val_pearson_delta'
+                             if opal_selection == 'pearson_delta' else 'reactive_val_mse')
+    else:
+        checkpoint_metric = ('reactive_val_pearson_delta'
+                             if agent['feedback_metric'] == 'pearson_delta' else 'reactive_val_mse')
     checkpoint_mode = 'max' if checkpoint_metric.endswith('pearson_delta') else 'min'
     manifest = {
         'txpert': config, 'agent': agent, 'baseline': args.baseline,
