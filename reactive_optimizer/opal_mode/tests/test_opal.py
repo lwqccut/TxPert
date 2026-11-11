@@ -32,6 +32,42 @@ class FixtureClient(ChatClient):
 
 
 class CodeTests(unittest.TestCase):
+    def test_lightning_bridge_observes_sample_weighted_loss_once_per_update(self):
+        class LossAccumulator:
+            _record_opal_training_loss = OpalPredictor._record_opal_training_loss
+            pop_opal_training_loss = OpalPredictor.pop_opal_training_loss
+            _opal_loss_sum = None
+            _opal_loss_weight = 0
+
+        class SpyOptimizer:
+            def __init__(self):
+                self.observed = []
+            def observe(self, loss):
+                self.observed.append(loss.detach().clone())
+
+        accumulator = LossAccumulator()
+        accumulator._record_opal_training_loss(torch.tensor(2.0), 2)
+        accumulator._record_opal_training_loss(torch.tensor(5.0), 1)
+        optimizer = SpyOptimizer()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = OpalAudit(AGENT, OPTIONS, Path(tmp), PROMPT, keep=True)
+            audit.on_before_optimizer_step(None, accumulator, optimizer)
+        self.assertEqual(len(optimizer.observed), 1)
+        self.assertAlmostEqual(float(optimizer.observed[0]), 3.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = OpalAudit(AGENT, OPTIONS, Path(tmp), PROMPT, keep=True)
+            with self.assertRaises(RuntimeError):
+                audit.on_before_optimizer_step(None, accumulator, optimizer)
+
+    def test_opal_selection_metric_is_explicit_and_validated(self):
+        from reactive_optimizer.opal_mode.backend import validate_options
+        options = dict(OPTIONS)
+        options['selection_metric'] = 'pearson_delta'
+        validate_options(options)
+        options['selection_metric'] = 'accuracy'
+        with self.assertRaises(ValueError):
+            validate_options(options)
+
     def fixture(self):
         model=torch.nn.Linear(2,2)
         opt=torch.optim.AdamW(model.parameters(),lr=0.001)
