@@ -19,11 +19,45 @@ def check_version():
 
 
 class OpalPredictor(ReactivePredictor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._opal_loss_sum = None
+        self._opal_loss_weight = 0
+
+    def _record_opal_training_loss(self, loss, batch_size):
+        """Accumulate detached micro-batch losses until Lightning performs an update."""
+        if not torch.is_tensor(loss) or loss.numel() != 1:
+            raise ValueError('OPAL requires a scalar training loss for every micro-batch')
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError('OPAL requires a positive integer batch size')
+        weighted = loss.detach() * batch_size
+        self._opal_loss_sum = weighted if self._opal_loss_sum is None else self._opal_loss_sum + weighted
+        self._opal_loss_weight += batch_size
+
+    def pop_opal_training_loss(self):
+        """Return the sample-weighted loss since the previous optimizer update."""
+        if self._opal_loss_sum is None or self._opal_loss_weight < 1:
+            raise RuntimeError('OPAL did not receive a training loss before the optimizer update')
+        loss = self._opal_loss_sum / self._opal_loss_weight
+        self._opal_loss_sum = None
+        self._opal_loss_weight = 0
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = super().training_step(batch, batch_idx)
+        self._record_opal_training_loss(loss, int(batch.control.shape[0]))
+        return loss
+
     def configure_opal(self, agent, options, output, keep=False, backend=None):
         check_version()
         validate_options(options)
         self.opal_agent, self.opal_options = agent, options
         self.opal_output, self.opal_keep = Path(output), keep
+        # Also initialize when tests or downstream wrappers adapt an existing
+        # ReactivePredictor instance into OpalPredictor after construction.
+        if not hasattr(self, '_opal_loss_sum'):
+            self._opal_loss_sum = None
+            self._opal_loss_weight = 0
         self.opal_backend = backend
 
     def configure_optimizers(self):
@@ -48,12 +82,15 @@ class OpalPredictor(ReactivePredictor):
                             backend=backend, schedule=schedule, every=options['every'],
                             max_decisions=options['max_decisions'], blocking=options['blocking'],
                             trial_steps=options['trial_steps'], snapshot_limit_gb=options['snapshot_limit_gb'],
-                            clip_grad_norm=self.opal_agent['clip_norm'], share_code=False,
+                            clip_grad_norm=self.opal_agent['clip_norm'],
+                            share_code=options.get('share_code', False),
                             summarize=False, pause_on_nonfinite=False,
                             run_dir=self.opal_output / 'opal')
         write_json(self.opal_output / 'opal-settings.json', {'version': opal.__version__,
                    'upstream_commit': UPSTREAM_COMMIT, 'options': options, 'keep': self.opal_keep,
-                   'parameter_specs': specs, 'decision_steps': schedule})
+                   'parameter_specs': specs, 'decision_steps': schedule,
+                   'share_code': options.get('share_code', False),
+                   'selection_metric': options.get('selection_metric', 'pearson_delta')})
         return wrapped
 
 
@@ -74,7 +111,17 @@ class OpalAudit(ReactiveController):
         trainer.gradient_clip_val = 0.0
 
     def on_before_optimizer_step(self, trainer, pl_module, optimizer):
-        pass
+        # Lightning owns optimizer.step(), so OPAL's documented integration is
+        # observe(loss) once per actual optimizer update. This hook runs after
+        # gradient accumulation and before the wrapped optimizer is stepped.
+        loss = pl_module.pop_opal_training_loss()
+        target = optimizer
+        if not callable(getattr(target, 'observe', None)):
+            target = getattr(target, 'optimizer', target)
+        observe = getattr(target, 'observe', None)
+        if not callable(observe):
+            raise RuntimeError('The active OPAL optimizer does not expose observe(loss)')
+        observe(loss)
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
@@ -100,7 +147,9 @@ class OpalAudit(ReactiveController):
         trainer.optimizers[0].close()
         write_json(self.directory / 'summary.json', {'engine': 'official-opal',
                    'global_step': int(trainer.global_step), 'last_validation': self.val,
-                   'keep': not self.enabled, 'note': 'Code acceptance/trial survival is not evidence of improved accuracy'})
+                   'selection_metric': self.options.get('selection_metric', 'pearson_delta'),
+                   'keep': not self.enabled,
+                   'note': 'Code acceptance/trial survival is not evidence of improved accuracy'})
 
     def on_exception(self, trainer, pl_module, exception):
         for optimizer in trainer.optimizers:
