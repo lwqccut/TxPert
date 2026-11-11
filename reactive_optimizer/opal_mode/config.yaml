@@ -1,5 +1,9 @@
 # Independent from the bounded-action controller and its validation rollback.
 # Checks are every N updates; scheduled decisions are at interval_steps multiples.
+# Pearson delta is the primary scientific endpoint; MSE is a secondary guard.
+selection_metric: pearson_delta
+# Share read-only model/training source with the coding agent. Enable only for a trusted endpoint.
+share_code: true
 every: 50
 interval_steps: 500
 max_decisions: 100
@@ -15,7 +19,7 @@ preflight_memory_gb: 8
 preflight_max_numel: 20000000
 preflight_steps: 4
 # Default runtime remains FP32, one training device, no external LR scheduler.
-goal: "Train the original TxPert perturbation predictor; improve held-out validation expression MSE within the fixed training budget. Never access test data."
+goal: "Train the original TxPert perturbation predictor within a fixed training budget. Primary endpoint: maximize held-out validation Pearson delta (mean correlation of predicted versus observed perturbation effects across condition groups). Use held-out validation expression MSE as a secondary diagnostic and guard against large regressions. Never access test data."
 # Multi-turn coding agent; json works without a server-specific tool parser.
 # openai uses native function calling and requires a matching server tool parser.
 agent_protocol: json

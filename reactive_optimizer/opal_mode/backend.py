@@ -72,6 +72,10 @@ def validate_options(cfg):
             raise ValueError(f'Invalid {key}')
     if not isinstance(cfg['goal'], str) or not cfg['goal'].strip():
         raise ValueError('A goal is required')
+    if cfg.get('selection_metric', 'pearson_delta') not in ('pearson_delta', 'mse'):
+        raise ValueError('selection_metric must be pearson_delta or mse')
+    if type(cfg.get('share_code', False)) is not bool:
+        raise ValueError('share_code must be boolean')
 
 
 def preflight(current, proposed, specs, options, record_dir):
